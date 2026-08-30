@@ -7,9 +7,9 @@
    3. PASSCODE       whatever you and your partner will type in
    ============================================================ */
 const CONFIG = {
-  SUPABASE_URL:      "https://YOUR-PROJECT.supabase.co",
-  SUPABASE_ANON_KEY: "YOUR-ANON-PUBLIC-KEY",
-  PASSCODE:          "1234",
+  SUPABASE_URL:      "https://ufiplsfnmabxyxsabqti.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVmaXBsc2ZubWFieHl4c2FicXRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxMTAxNjcsImV4cCI6MjEwMzY4NjE2N30.yB_hYbyslU_HcEsXdSZWxVtqpMuubLN4VGSK01uoup0",
+  PASSCODE:          "9095",
   BUSINESS_NAME:     "Nanie's Delicacies"
 };
 /* ====================== end of config ====================== */
