@@ -151,6 +151,19 @@ function lock() {
 function openApp() {
   $("#app").hidden = false;
 
+  // the Supabase library comes from a CDN — on a phone with no signal it never arrives
+  if (!window.supabase || typeof window.supabase.createClient !== "function") {
+    $("#screen").innerHTML =
+      '<div class="card"><div class="empty">' +
+      '<span class="empty-big">\ud83d\udcf6</span>' +
+      "<strong>Could not start up</strong><br>" +
+      "This needs internet the first time it opens. Get onto data or wifi, " +
+      "then close and open it again." +
+      "</div></div>" +
+      '<button class="btn btn-block" style="margin-top:16px" onclick="location.reload()">Try again</button>';
+    return;
+  }
+
   if (!CONFIG.SUPABASE_URL.startsWith("https://") || CONFIG.SUPABASE_URL.includes("YOUR-PROJECT")) {
     $("#screen").innerHTML =
       '<div class="card"><div class="empty">' +
