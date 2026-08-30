@@ -53,6 +53,15 @@ function niceDate(iso) {
   return d + " " + MONTHS[m - 1] + " " + y;
 }
 
+/** Same, but the year is left off when it is this year — list rows are tight. */
+function shortDate(iso) {
+  if (!iso) return "";
+  const [y, m, d] = String(iso).split("-").map(Number);
+  if (!y || !m || !d) return String(iso);
+  if (y === new Date().getFullYear()) return d + " " + MONTHS[m - 1];
+  return d + " " + MONTHS[m - 1] + " " + y;
+}
+
 function escapeHTML(text) {
   return String(text == null ? "" : text).replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
@@ -285,9 +294,9 @@ function go(screen) {
 
 function render() {
   const screen = $("#screen");
-  if (state.screen === "sales")     { screen.innerHTML = salesScreen(); wireList("sales"); return; }
-  if (state.screen === "purchases") { screen.innerHTML = soonScreen("Purchases"); return; }
-  if (state.screen === "stock")     { screen.innerHTML = soonScreen("Stock orders"); return; }
+  if (state.screen === "sales")     { screen.innerHTML = salesScreen();     wireList("sales");     return; }
+  if (state.screen === "purchases") { screen.innerHTML = purchasesScreen(); wireList("purchases"); return; }
+  if (state.screen === "stock")     { screen.innerHTML = stockScreen();     wireList("stock");     return; }
   screen.innerHTML = soonScreen("Home");
 }
 
@@ -361,7 +370,7 @@ function salesScreen() {
       '<button class="row" data-open="' + s.id + '">' +
         '<div class="row-main">' +
           '<div class="row-title">' + escapeHTML(s.customer) + "</div>" +
-          '<div class="row-sub">' + escapeHTML(s.product) + " · " + niceDate(s.date) +
+          '<div class="row-sub">' + escapeHTML(s.product) + " · " + shortDate(s.date) +
             " · " + (s.method === "eft" ? "EFT" : "Cash") +
             (s.status === "part" ? " · " + money(outstanding) + " due" : "") + "</div>" +
         "</div>" +
@@ -445,6 +454,248 @@ function editSale(sale) {
 
   wirePickers();
   if (!isNew) wireDelete("this sale", () => remove("sales", s.id));
+}
+
+
+/* ---------- purchases ---------- */
+
+function purchasesScreen() {
+  if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+
+  const range = filterRange(state.filter.purchases);
+  const rows = db.purchases.filter((p) => inRange(p.date, range));
+  const total = rows.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const owing = rows.filter((p) => p.status === "unpaid")
+                    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+  let html = filterBar("purchases");
+  html += '<div class="section-head"><span>' + rows.length + " purchase" + (rows.length === 1 ? "" : "s") +
+          "</span><span>" + money(total) + "</span></div>";
+
+  if (!rows.length) {
+    html += emptyBox("No purchases yet. Tap + to add the first one.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  rows.forEach((p) => {
+    const paid = p.status === "paid";
+    html +=
+      '<button class="row" data-open="' + p.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(p.item) + "</div>" +
+          '<div class="row-sub">' +
+            (p.supplier ? escapeHTML(p.supplier) + " · " : "") + shortDate(p.date) +
+            " · " + (p.method === "eft" ? "EFT" : "Cash") + "</div>" +
+        "</div>" +
+        '<div class="row-side">' +
+          '<div class="row-amt">' + money(p.amount) + "</div>" +
+          '<span class="pill ' + (paid ? "pill-good" : "pill-bad") + '">' +
+            (paid ? "Paid" : "Not paid") + "</span>" +
+        "</div>" +
+      "</button>";
+  });
+  html += "</div>";
+
+  if (owing > 0) {
+    html += '<p class="field-hint" style="text-align:center">Still to pay in this period: <strong>' +
+            money(owing) + "</strong></p>";
+  }
+  return html;
+}
+
+function editPurchase(purchase) {
+  const isNew = !purchase;
+  const p = purchase || {
+    date: todayISO(), item: "", supplier: "", amount: "",
+    status: "paid", method: "cash", note: ""
+  };
+
+  const suppliers = uniqueValues(db.purchases, "supplier");
+  const items     = uniqueValues(db.purchases, "item");
+
+  const body =
+    field("Date", '<input id="f-date" type="date" value="' + escapeHTML(p.date) + '">') +
+    field("Item", textInput("f-item", p.item, "What did you buy?", "list-items") + dataList("list-items", items)) +
+    field("Supplier", textInput("f-supplier", p.supplier, "Who from?", "list-suppliers") + dataList("list-suppliers", suppliers)) +
+    field("Amount", amountInput("f-amount", p.amount)) +
+    field("Payment", choice("f-status", [["paid", "Paid"], ["unpaid", "Not paid"]], p.status)) +
+    field("Method", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], p.method)) +
+    field("Note (optional)", '<textarea id="f-note">' + escapeHTML(p.note || "") + "</textarea>") +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "New purchase" : "Edit purchase", body, async () => {
+    const item = $("#f-item").value.trim();
+    const amount = toNum($("#f-amount").value);
+    if (!item) { toast("Enter what you bought."); return false; }
+    if (amount <= 0) { toast("Enter an amount."); return false; }
+
+    const row = {
+      date: $("#f-date").value || todayISO(),
+      item: item,
+      supplier: $("#f-supplier").value.trim() || null,
+      amount: amount,
+      status: choiceValue("f-status"),
+      method: choiceValue("f-method"),
+      note: $("#f-note").value.trim() || null
+    };
+    const ok = await save("purchases", row, isNew ? null : p.id);
+    if (ok) toast(isNew ? "Purchase saved." : "Purchase updated.");
+    return ok;
+  });
+
+  if (!isNew) wireDelete("this purchase", () => remove("purchases", p.id));
+}
+
+
+/* ---------- stock orders ---------- */
+
+function stockScreen() {
+  if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+
+  const range = filterRange(state.filter.stock);
+  const rows = db.stock.filter((o) => inRange(o.date_ordered, range));
+  const openUnits = rows.filter((o) => !o.complete)
+                        .reduce((sum, o) => sum + outstandingUnits(o), 0);
+
+  let html = filterBar("stock");
+  html += '<div class="section-head"><span>' + rows.length + " order" + (rows.length === 1 ? "" : "s") +
+          "</span><span>" + tidyUnits(openUnits) + " still to deliver</span></div>";
+
+  if (!rows.length) {
+    html += emptyBox("No stock orders yet. Tap + to add the first one.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  rows.forEach((o) => {
+    const left = outstandingUnits(o);
+    const done = o.complete || left <= 0;
+    html +=
+      '<button class="row" data-open="' + o.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(o.product) + "</div>" +
+          '<div class="row-sub">' + escapeHTML(o.customer) + " · ordered " + shortDate(o.date_ordered) +
+            (Number(o.unit_price) ? " · " + money(o.unit_price) + " each" : "") + "</div>" +
+        "</div>" +
+        '<div class="row-side">' +
+          '<div class="row-amt">' + tidyUnits(o.qty_delivered) + " / " + tidyUnits(o.qty_ordered) + "</div>" +
+          '<span class="pill ' + (done ? "pill-good" : "pill-warn") + '">' +
+            (done ? "Complete" : tidyUnits(left) + " to go") + "</span>" +
+        "</div>" +
+      "</button>";
+  });
+  html += "</div>";
+  return html;
+}
+
+function outstandingUnits(order) {
+  return Math.max(0, Number(order.qty_ordered || 0) - Number(order.qty_delivered || 0));
+}
+
+/** 12 -> "12", 12.5 -> "12.5" — units are counted, not money. */
+function tidyUnits(value) {
+  const n = Number(value) || 0;
+  return String(Math.round(n * 100) / 100);
+}
+
+function editStock(order) {
+  const isNew = !order;
+  const o = order || {
+    product: "", customer: "", date_ordered: todayISO(), qty_ordered: "",
+    unit_price: "", date_delivered: "", qty_delivered: "", complete: false, note: ""
+  };
+
+  const body =
+    pickerField("Product", "f-product", db.products.map((p) => p.name), o.product, "product") +
+    pickerField("Customer", "f-customer", db.customers.map((c) => c.name), o.customer, "customer") +
+    '<div class="two">' +
+      field("Date ordered", '<input id="f-ordered" type="date" value="' + escapeHTML(o.date_ordered || "") + '">') +
+      field("Units ordered", numberInput("f-qty-ordered", o.qty_ordered, "0")) +
+    "</div>" +
+    field("Price per unit", amountInput("f-unit-price", o.unit_price)) +
+    '<div class="two">' +
+      field("Date delivered", '<input id="f-delivered" type="date" value="' + escapeHTML(o.date_delivered || "") + '">') +
+      field("Units delivered", numberInput("f-qty-delivered", o.qty_delivered, "0")) +
+    "</div>" +
+    '<p id="f-outstanding" class="field-hint" style="text-align:center;font-size:15px"></p>' +
+    field("Order complete?", choice("f-complete", [["no", "Not yet"], ["yes", "Complete"]],
+                                   o.complete ? "yes" : "no")) +
+    field("Note (optional)", '<textarea id="f-note">' + escapeHTML(o.note || "") + "</textarea>") +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "New stock order" : "Edit stock order", body, async () => {
+    const product  = $("#f-product").value;
+    const customer = $("#f-customer").value;
+    const ordered  = toNum($("#f-qty-ordered").value);
+    if (!product)  { toast("Choose a product."); return false; }
+    if (!customer) { toast("Choose a customer."); return false; }
+    if (ordered <= 0) { toast("Enter how many units were ordered."); return false; }
+
+    const row = {
+      product: product,
+      customer: customer,
+      date_ordered: $("#f-ordered").value || todayISO(),
+      qty_ordered: ordered,
+      unit_price: toNum($("#f-unit-price").value),
+      date_delivered: $("#f-delivered").value || null,
+      qty_delivered: toNum($("#f-qty-delivered").value),
+      complete: choiceValue("f-complete") === "yes",
+      note: $("#f-note").value.trim() || null
+    };
+    const ok = await save("stock_orders", row, isNew ? null : o.id);
+    if (ok) toast(isNew ? "Order saved." : "Order updated.");
+    return ok;
+  });
+
+  const showOutstanding = () => {
+    const ordered   = toNum($("#f-qty-ordered").value);
+    const delivered = toNum($("#f-qty-delivered").value);
+    const left  = Math.max(0, ordered - delivered);
+    const price = toNum($("#f-unit-price").value);
+    $("#f-outstanding").innerHTML =
+      "Outstanding: <strong>" + tidyUnits(left) + " unit" + (left === 1 ? "" : "s") + "</strong>" +
+      (price ? " · " + money(left * price) : "");
+  };
+  ["f-qty-ordered", "f-qty-delivered", "f-unit-price"].forEach((id) => {
+    $("#" + id).addEventListener("input", showOutstanding);
+  });
+  showOutstanding();
+
+  // filling in a delivery date with nothing delivered yet is almost always a slip
+  $("#f-qty-delivered").addEventListener("change", () => {
+    if (toNum($("#f-qty-delivered").value) > 0 && !$("#f-delivered").value) {
+      $("#f-delivered").value = todayISO();
+    }
+  });
+
+  wirePickers();
+  if (!isNew) wireDelete("this stock order", () => remove("stock_orders", o.id));
+}
+
+
+/* ---------- shared inputs ---------- */
+
+function textInput(id, value, placeholder, listId) {
+  return '<input id="' + id + '" type="text" autocapitalize="words" ' +
+         (listId ? 'list="' + listId + '" ' : "") +
+         'placeholder="' + escapeHTML(placeholder || "") + '" ' +
+         'value="' + escapeHTML(value || "") + '">';
+}
+
+function dataList(id, values) {
+  return '<datalist id="' + id + '">' +
+         values.map((v) => '<option value="' + escapeHTML(v) + '"></option>').join("") +
+         "</datalist>";
+}
+
+function uniqueValues(rows, key) {
+  const seen = [];
+  rows.forEach((r) => {
+    const v = (r[key] || "").trim();
+    if (v && !seen.includes(v)) seen.push(v);
+  });
+  return seen.sort();
 }
 
 
