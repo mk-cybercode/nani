@@ -266,8 +266,9 @@ button { cursor: pointer; }
 /* ---------- Toast ---------- */
 
 .toast {
+  /* sits at the top so it never covers the buttons at the bottom of a form */
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(96px + var(--safe-b)); z-index: 90;
+  top: calc(12px + env(safe-area-inset-top, 0px)); z-index: 90; pointer-events: none;
   background: #23272a; color: #fff; padding: 12px 18px;
   border-radius: 999px; font-size: 15px; max-width: 90vw; text-align: center;
 }
@@ -332,3 +333,20 @@ button { cursor: pointer; }
   #print-area tr { break-inside: avoid; }
   @page { margin: 14mm; }
 }
+
+/* ---------- running totals inside a form ---------- */
+
+.totals-box {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 16px;
+}
+.totals-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px; padding: 3px 0; color: var(--ink-soft);
+}
+.totals-row strong { color: var(--ink); font-size: 19px; font-variant-numeric: tabular-nums; }
+.totals-profit { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 8px; }
+.totals-note { font-size: 13px; color: var(--warn); margin-top: 8px; }
+
+.ask-form { text-align: left; }
+.ask-form .ask-text { text-align: center; font-weight: 700; }

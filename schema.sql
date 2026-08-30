@@ -14,20 +14,35 @@ create table if not exists customers (
   created_at timestamptz not null default now()
 );
 
+-- Each product carries what one unit costs you to make and what you
+-- normally sell one unit for. Both can be changed in the app at any time.
 create table if not exists products (
   id         uuid primary key default gen_random_uuid(),
   name       text not null unique,
+  cost_price numeric(12,2) not null default 0,   -- what one unit costs you
+  sell_price numeric(12,2) not null default 0,   -- what you normally charge
   created_at timestamptz not null default now()
 );
 
+alter table products add column if not exists cost_price numeric(12,2) not null default 0;
+alter table products add column if not exists sell_price numeric(12,2) not null default 0;
+
 -- ---------- Sales / income ----------
 
+-- A sale is a number of units at a price each.
+--   amount = units * unit_price
+--   profit = (unit_price - unit_cost) * units
+-- unit_cost is copied from the product when the sale is captured, so
+-- changing a product's cost price later does not rewrite old sales.
 create table if not exists sales (
   id              uuid primary key default gen_random_uuid(),
   date            date not null default current_date,
   customer        text not null,
   product         text not null,
-  amount          numeric(12,2) not null default 0,   -- full price of the sale
+  units           numeric(12,2) not null default 1,   -- how many units were sold
+  unit_price      numeric(12,2) not null default 0,   -- what you charged for one
+  unit_cost       numeric(12,2) not null default 0,   -- what one cost you to make
+  amount          numeric(12,2) not null default 0,   -- units * unit_price
   status          text not null default 'unpaid'      -- paid | part | unpaid
                   check (status in ('paid','part','unpaid')),
   amount_received numeric(12,2) not null default 0,   -- how much has actually come in
@@ -37,6 +52,13 @@ create table if not exists sales (
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now()
 );
+
+-- If you ran an earlier version of this file, this adds the new columns
+-- and treats every existing sale as one unit at the price it was captured at.
+alter table sales add column if not exists units      numeric(12,2) not null default 1;
+alter table sales add column if not exists unit_price numeric(12,2) not null default 0;
+alter table sales add column if not exists unit_cost  numeric(12,2) not null default 0;
+update sales set unit_price = amount where unit_price = 0 and amount <> 0;
 
 -- ---------- Purchases / expenses ----------
 
@@ -130,6 +152,8 @@ create index if not exists idx_adjustments_date  on adjustments (date desc, crea
 insert into customers (name) values ('Forsmay Butchery'), ('Freezer Fillers')
   on conflict (name) do nothing;
 
+-- Cost and selling prices start at zero — set them in the app under
+-- "Products & prices" on the Home screen.
 insert into products (name) values ('Green Chutney'), ('Sesame Crunch Oil')
   on conflict (name) do nothing;
 

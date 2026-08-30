@@ -23,7 +23,9 @@ You need a free Supabase project. It holds the data so both phones see the same 
 6. Click **Table Editor** in the sidebar — you should now see six tables:
    `customers`, `products`, `sales`, `purchases`, `stock_orders`, `adjustments`.
    `customers` already has Forsmay Butchery and Freezer Fillers in it, and
-   `products` has Green Chutney and Sesame Crunch Oil.
+   `products` has Green Chutney and Sesame Crunch Oil, both with no prices yet.
+   You set the cost and selling prices in the app, under **Products & prices**
+   on the Home screen.
 
 The SQL is safe to run again if you are ever unsure whether it worked.
 

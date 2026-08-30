@@ -90,6 +90,24 @@ function inRange(iso, range) {
 }
 
 
+/* ---------- products ---------- */
+
+function findProduct(name) {
+  return db.products.find((p) => p.name === name) || null;
+}
+
+function costOf(name) {
+  const product = findProduct(name);
+  return product ? Number(product.cost_price || 0) : 0;
+}
+
+/** What one sale made: (price each - cost each) x units. */
+function saleProfit(sale) {
+  const units = Number(sale.units || 0);
+  return (Number(sale.unit_price || 0) - Number(sale.unit_cost || 0)) * units;
+}
+
+
 /* ---------- app state ---------- */
 
 let sb = null;
@@ -191,7 +209,9 @@ function wireChrome() {
     if (state.screen === "sales") editSale(null);
     if (state.screen === "purchases") editPurchase(null);
     if (state.screen === "stock") editStock(null);
+    if (state.screen === "products") editProduct(null);
   });
+  $("#back-btn").addEventListener("click", () => go("home"));
   $("#menu-btn").addEventListener("click", openMenu);
 
   $$("[data-close]").forEach((el) => el.addEventListener("click", closeSheet));
@@ -294,7 +314,8 @@ async function remove(table, id) {
 
 /* ---------- navigation ---------- */
 
-const TITLES = { home: "Home", sales: "Sales", purchases: "Purchases", stock: "Stock orders" };
+const TITLES = { home: "Home", sales: "Sales", purchases: "Purchases",
+                 stock: "Stock orders", products: "Products & prices" };
 
 function go(screen) {
   state.screen = screen;
@@ -303,6 +324,7 @@ function go(screen) {
     if (t.dataset.nav === screen) t.setAttribute("aria-current", "page");
     else t.removeAttribute("aria-current");
   });
+  $("#back-btn").hidden = (screen !== "products");
   $("#fab").hidden = (screen === "home");
   window.scrollTo(0, 0);
   render();
@@ -313,6 +335,7 @@ function render() {
   if (state.screen === "sales")     { screen.innerHTML = salesScreen();     wireList("sales");     return; }
   if (state.screen === "purchases") { screen.innerHTML = purchasesScreen(); wireList("purchases"); return; }
   if (state.screen === "stock")     { screen.innerHTML = stockScreen();     wireList("stock");     return; }
+  if (state.screen === "products")  { screen.innerHTML = productsScreen();  wireProducts();        return; }
   screen.innerHTML = homeScreen();
   wireHome();
 }
@@ -360,8 +383,10 @@ function salesScreen() {
   const range = filterRange(state.filter.sales);
   const rows = db.sales.filter((s) => inRange(s.date, range));
 
-  const total = rows.reduce((sum, s) => sum + Number(s.amount || 0), 0);
-  const owed  = rows.reduce((sum, s) => sum + (Number(s.amount || 0) - Number(s.amount_received || 0)), 0);
+  const total  = rows.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+  const profit = rows.reduce((sum, s) => sum + saleProfit(s), 0);
+  const owed   = rows.reduce((sum, s) =>
+    sum + Math.max(0, Number(s.amount || 0) - Number(s.amount_received || 0)), 0);
 
   let html = filterBar("sales");
 
@@ -376,71 +401,84 @@ function salesScreen() {
   html += '<div class="card">';
   rows.forEach((s) => {
     const meta = SALE_STATUS[s.status] || SALE_STATUS.unpaid;
-    const outstanding = Number(s.amount || 0) - Number(s.amount_received || 0);
-    const pillText = meta.label;
+    const outstanding = Math.max(0, Number(s.amount || 0) - Number(s.amount_received || 0));
     html +=
       '<button class="row" data-open="' + s.id + '">' +
         '<div class="row-main">' +
           '<div class="row-title">' + escapeHTML(s.customer) + "</div>" +
-          '<div class="row-sub">' + escapeHTML(s.product) + " · " + shortDate(s.date) +
+          '<div class="row-sub">' +
+            tidyUnits(s.units) + " × " + escapeHTML(s.product) + " · " + shortDate(s.date) +
             " · " + (s.method === "eft" ? "EFT" : "Cash") +
-            (s.status === "part" ? " · " + money(outstanding) + " due" : "") + "</div>" +
+            (s.status === "part" ? " · " + money(outstanding) + " still due" : "") + "</div>" +
         "</div>" +
         '<div class="row-side">' +
           '<div class="row-amt">' + money(s.amount) + "</div>" +
-          '<span class="pill ' + meta.pill + '">' + pillText + "</span>" +
+          '<span class="pill ' + meta.pill + '">' + meta.label + "</span>" +
         "</div>" +
       "</button>";
   });
   html += "</div>";
 
-  if (owed > 0) {
-    html += '<p class="field-hint" style="text-align:center">Still owed to us in this period: <strong>' +
-            money(owed) + "</strong></p>";
-  }
+  html += '<p class="field-hint" style="text-align:center">Profit on these sales: <strong>' +
+          money(profit) + "</strong>" +
+          (owed > 0 ? " · still owed to us: <strong>" + money(owed) + "</strong>" : "") + "</p>";
   return html;
 }
 
 function editSale(sale) {
   const isNew = !sale;
   const s = sale || {
-    date: todayISO(), customer: "", product: "",
-    amount: "", status: "unpaid", amount_received: "", method: "cash", note: ""
+    date: todayISO(), customer: "", product: "", units: "", unit_price: "", unit_cost: 0,
+    status: "unpaid", amount_received: "", method: "cash", note: ""
   };
 
   const body =
     field("Date", '<input id="f-date" type="date" value="' + escapeHTML(s.date) + '">') +
-    pickerField("Customer", "f-customer", db.customers.map((c) => c.name), s.customer, "customer") +
+    pickerField("Sold to", "f-customer", db.customers.map((c) => c.name), s.customer, "customer") +
     pickerField("Product", "f-product", db.products.map((p) => p.name), s.product, "product") +
-    field("Amount", amountInput("f-amount", s.amount)) +
-    field("Payment", choice("f-status", [
+    '<div class="two">' +
+      field("How many units", numberInput("f-units", s.units, "0")) +
+      field("Price for one", amountInput("f-price", s.unit_price)) +
+    "</div>" +
+    '<div class="totals-box" id="f-totals"></div>' +
+    field("Have they paid?", choice("f-status", [
       ["paid", "Paid"], ["part", "Part paid"], ["unpaid", "Not paid"]
     ], s.status)) +
     '<div id="wrap-received">' +
-      field("Received so far", amountInput("f-received", s.amount_received)) +
+      field("How much have they paid so far", amountInput("f-received", s.amount_received)) +
     "</div>" +
-    field("Method", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], s.method)) +
+    field("Paid by", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], s.method)) +
     field("Note (optional)", '<textarea id="f-note">' + escapeHTML(s.note || "") + "</textarea>") +
     (isNew ? "" : deleteButton());
 
   openSheet(isNew ? "New sale" : "Edit sale", body, async () => {
-    const amount = toNum($("#f-amount").value);
-    const status = choiceValue("f-status");
+    const customer = $("#f-customer").value;
+    const product  = $("#f-product").value;
+    const units    = toNum($("#f-units").value);
+    const price    = toNum($("#f-price").value);
+    const amount   = units * price;
+    const status   = choiceValue("f-status");
+
+    if (!customer) { toast("Choose who you sold to."); return false; }
+    if (!product)  { toast("Choose a product."); return false; }
+    if (units <= 0) { toast("Enter how many units you sold."); return false; }
+    if (price <= 0) { toast("Enter the price for one unit."); return false; }
+
     let received = toNum($("#f-received").value);
     if (status === "paid") received = amount;
     if (status === "unpaid") received = 0;
     if (received > amount) received = amount;
 
-    const customer = $("#f-customer").value;
-    const product  = $("#f-product").value;
-    if (!customer) { toast("Choose a customer."); return false; }
-    if (!product)  { toast("Choose a product."); return false; }
-    if (amount <= 0) { toast("Enter an amount."); return false; }
-
+    // the cost is copied in when the sale is captured, so changing a
+    // product's cost price later does not rewrite old sales
+    const keepCost = !isNew && product === s.product;
     const row = {
       date: $("#f-date").value || todayISO(),
       customer: customer,
       product: product,
+      units: units,
+      unit_price: price,
+      unit_cost: keepCost ? Number(s.unit_cost || 0) : costOf(product),
       amount: amount,
       status: status,
       amount_received: received,
@@ -452,17 +490,51 @@ function editSale(sale) {
     return ok;
   });
 
+  // running total and profit, updated as they type
+  const showTotals = () => {
+    const units = toNum($("#f-units").value);
+    const price = toNum($("#f-price").value);
+    const name  = $("#f-product").value;
+    const keepCost = !isNew && name === s.product;
+    const cost  = keepCost ? Number(s.unit_cost || 0) : costOf(name);
+    const total = units * price;
+    const profit = (price - cost) * units;
+
+    let note = "";
+    if (name && !cost) {
+      note = '<div class="totals-note">No cost price set for ' + escapeHTML(name) +
+             " — profit cannot be worked out. Set it under Products &amp; prices on Home.</div>";
+    }
+    $("#f-totals").innerHTML =
+      '<div class="totals-row"><span>Total</span><strong>' + money(total) + "</strong></div>" +
+      '<div class="totals-row"><span>Cost (' + tidyUnits(units) + " × " + money(cost) +
+        ")</span><span>" + money(cost * units) + "</span></div>" +
+      '<div class="totals-row totals-profit"><span>Profit</span><strong class="' +
+        (profit < 0 ? "amt-bad" : "amt-good") + '">' + money(profit) + "</strong></div>" + note;
+  };
+
   const syncReceived = () => {
     const status = choiceValue("f-status");
-    const amount = toNum($("#f-amount").value);
-    const wrap = $("#wrap-received");
-    wrap.hidden = (status !== "part");
-    if (status === "paid") $("#f-received").value = amount ? amount.toFixed(2) : "";
+    const total = toNum($("#f-units").value) * toNum($("#f-price").value);
+    $("#wrap-received").hidden = (status !== "part");
+    if (status === "paid") $("#f-received").value = total ? total.toFixed(2) : "";
     if (status === "unpaid") $("#f-received").value = "";
   };
+
+  const refresh = () => { showTotals(); syncReceived(); };
+
+  // picking a product fills in its usual selling price
+  $("#f-product").addEventListener("change", () => {
+    const product = findProduct($("#f-product").value);
+    if (product && Number(product.sell_price || 0) > 0) {
+      $("#f-price").value = Number(product.sell_price).toFixed(2);
+    }
+    refresh();
+  });
+  $("#f-units").addEventListener("input", refresh);
+  $("#f-price").addEventListener("input", refresh);
   onChoice("f-status", syncReceived);
-  $("#f-amount").addEventListener("input", syncReceived);
-  syncReceived();
+  refresh();
 
   wirePickers();
   if (!isNew) wireDelete("this sale", () => remove("sales", s.id));
@@ -513,14 +585,19 @@ function totals() {
     sum + (p.status === "unpaid" ? Number(p.amount || 0) : 0), 0);
 
   const month = filterRange("this");
-  const salesMonth = db.sales.filter((s) => inRange(s.date, month))
-    .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+  const monthSales = db.sales.filter((s) => inRange(s.date, month));
+  const salesMonth  = monthSales.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+  const costMonth   = monthSales.reduce((sum, s) =>
+    sum + Number(s.unit_cost || 0) * Number(s.units || 0), 0);
+  const unitsMonth  = monthSales.reduce((sum, s) => sum + Number(s.units || 0), 0);
   const purchasesMonth = db.purchases.filter((p) => inRange(p.date, month))
     .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
   return {
     cash: cash, bank: bank, owedToUs: owedToUs, weOwe: weOwe,
-    salesMonth: salesMonth, purchasesMonth: purchasesMonth,
+    salesMonth: salesMonth, costMonth: costMonth, unitsMonth: unitsMonth,
+    profitMonth: salesMonth - costMonth,
+    purchasesMonth: purchasesMonth,
     netMonth: salesMonth - purchasesMonth
   };
 }
@@ -552,12 +629,14 @@ function homeScreen() {
       tile("Owed to us", t.owedToUs, t.owedToUs > 0 ? "warn" : null) +
       tile("We still owe", t.weOwe, t.weOwe > 0 ? "bad" : null) +
     "</div>" +
-    '<div class="tile tile-wide' + (t.netMonth < 0 ? " tile-bad" : " tile-good") + '">' +
-      '<div class="tile-label">Net income · ' + thisMonthName() + "</div>" +
-      '<div class="tile-value">' + money(t.netMonth) + "</div>" +
-      '<div class="tile-foot">' + money(t.salesMonth) + " in · " + money(t.purchasesMonth) + " out</div>" +
+    '<div class="tile tile-wide' + (t.profitMonth < 0 ? " tile-bad" : " tile-good") + '">' +
+      '<div class="tile-label">Profit · ' + thisMonthName() + "</div>" +
+      '<div class="tile-value">' + money(t.profitMonth) + "</div>" +
+      '<div class="tile-foot">' + tidyUnits(t.unitsMonth) + " units sold · " +
+        money(t.salesMonth) + " taken in · " + money(t.costMonth) + " they cost you</div>" +
     "</div>" +
-    '<button class="btn btn-block" id="h-adjust" style="margin-top:16px">Adjust cash or bank</button>' +
+    '<button class="btn btn-block btn-primary" id="h-products" style="margin-top:16px">Products &amp; prices</button>' +
+    '<button class="btn btn-block" id="h-adjust" style="margin-top:10px">Adjust cash or bank</button>' +
     '<button class="btn btn-block" id="h-export" style="margin-top:10px">Export for the bookkeeper</button>';
 
   const recent = recentEntries(6);
@@ -588,8 +667,9 @@ function recentEntries(limit) {
 
   db.sales.forEach((s) => list.push({
     kind: "sale", id: s.id, when: s.created_at || s.date,
-    title: s.customer + " · " + s.product,
-    sub: "Sale · " + shortDate(s.date) + " · " + (s.method === "eft" ? "EFT" : "Cash"),
+    title: s.customer + " · " + tidyUnits(s.units) + " × " + s.product,
+    sub: "Sale · " + shortDate(s.date) + " · " + (s.method === "eft" ? "EFT" : "Cash") +
+         " · " + money(saleProfit(s)) + " profit",
     amountText: "+" + money(s.amount), tone: "amt-good"
   }));
 
@@ -622,6 +702,8 @@ function recentEntries(limit) {
 }
 
 function wireHome() {
+  const products = $("#h-products");
+  if (products) products.addEventListener("click", () => go("products"));
   const adjust = $("#h-adjust");
   if (adjust) adjust.addEventListener("click", () => editAdjustment(null));
   const exportBtn = $("#h-export");
@@ -636,6 +718,91 @@ function wireHome() {
       if (kind === "adjustment") editAdjustment(db.adjustments.find((r) => r.id === id));
     });
   });
+}
+
+
+/* ---------- products and their prices ---------- */
+
+function productsScreen() {
+  if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+
+  let html = '<p class="field-hint" style="margin:0 2px 14px">What one unit costs you to make, ' +
+             "and what you normally sell it for. The profit on every sale comes from these.</p>";
+
+  if (!db.products.length) {
+    html += emptyBox("No products yet. Tap + to add one.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  db.products.forEach((p) => {
+    const cost = Number(p.cost_price || 0);
+    const sell = Number(p.sell_price || 0);
+    const margin = sell - cost;
+    const priced = cost > 0 || sell > 0;
+    html +=
+      '<button class="row" data-product="' + p.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(p.name) + "</div>" +
+          '<div class="row-sub">' +
+            (priced ? "Costs " + money(cost) + " · sells for " + money(sell)
+                    : "No prices yet — tap to add them") + "</div>" +
+        "</div>" +
+        '<div class="row-side">' +
+          (priced
+            ? '<div class="row-amt ' + (margin > 0 ? "amt-good" : "amt-bad") + '">' + money(margin) +
+              '</div><div class="row-sub">profit each</div>'
+            : '<span class="pill pill-warn">Set prices</span>') +
+        "</div>" +
+      "</button>";
+  });
+  html += "</div>";
+  return html;
+}
+
+function wireProducts() {
+  $$("[data-product]").forEach((row) => {
+    row.addEventListener("click", () =>
+      editProduct(db.products.find((p) => p.id === row.dataset.product)));
+  });
+}
+
+function editProduct(product) {
+  const isNew = !product;
+  const p = product || { name: "", cost_price: "", sell_price: "" };
+
+  const body =
+    field("Product name", textInput("f-name", p.name, "e.g. Green Chutney")) +
+    field("What one unit costs you", amountInput("f-cost", p.cost_price)) +
+    field("What you sell one for", amountInput("f-sell", p.sell_price)) +
+    '<p id="f-margin" class="field-hint" style="text-align:center;font-size:15px"></p>' +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "New product" : "Edit product", body, async () => {
+    const name = $("#f-name").value.trim();
+    if (!name) { toast("Give the product a name."); return false; }
+    const row = {
+      name: name,
+      cost_price: toNum($("#f-cost").value),
+      sell_price: toNum($("#f-sell").value)
+    };
+    const ok = await save("products", row, isNew ? null : p.id);
+    if (ok) toast(isNew ? "Product added." : "Prices updated.");
+    return ok;
+  });
+
+  const showMargin = () => {
+    const cost = toNum($("#f-cost").value);
+    const sell = toNum($("#f-sell").value);
+    $("#f-margin").innerHTML = (sell || cost)
+      ? "You make <strong>" + money(sell - cost) + "</strong> on every unit sold"
+      : "";
+  };
+  $("#f-cost").addEventListener("input", showMargin);
+  $("#f-sell").addEventListener("input", showMargin);
+  showMargin();
+
+  if (!isNew) wireDelete("this product", () => remove("products", p.id));
 }
 
 
@@ -971,22 +1138,40 @@ function wirePickers() {
     btn.addEventListener("click", () => {
       const kind = btn.dataset.add;             // "customer" | "product"
       const select = $("#" + btn.dataset.target);
-      askForText(kind === "customer" ? "New customer" : "New product", async (name) => {
-        const clean = name.trim();
-        if (!clean) return;
-        const table = kind === "customer" ? "customers" : "products";
-        const existing = (kind === "customer" ? db.customers : db.products)
-          .find((r) => r.name.toLowerCase() === clean.toLowerCase());
-        if (!existing) {
-          const ok = await save(table, { name: clean }, null);
-          if (!ok) return;
-        }
+
+      const addToSelect = (name) => {
         const option = document.createElement("option");
-        option.value = clean;
-        option.textContent = clean;
+        option.value = name;
+        option.textContent = name;
         select.appendChild(option);
-        select.value = clean;
-        toast(clean + " added.");
+        select.value = name;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        toast(name + " added.");
+      };
+
+      if (kind === "customer") {
+        askForText("New customer", [{ id: "name", label: "Name" }], async (values) => {
+          const name = values.name.trim();
+          if (!name) return;
+          const known = db.customers.find((c) => c.name.toLowerCase() === name.toLowerCase());
+          if (!known && !(await save("customers", { name: name }, null))) return;
+          addToSelect(name);
+        });
+        return;
+      }
+
+      askForText("New product", [
+        { id: "name", label: "Name" },
+        { id: "cost", label: "What one costs you", money: true },
+        { id: "sell", label: "What you sell one for", money: true }
+      ], async (values) => {
+        const name = values.name.trim();
+        if (!name) return;
+        const known = db.products.find((r) => r.name.toLowerCase() === name.toLowerCase());
+        if (!known && !(await save("products", {
+          name: name, cost_price: toNum(values.cost), sell_price: toNum(values.sell)
+        }, null))) return;
+        addToSelect(name);
       });
     });
   });
@@ -1088,29 +1273,38 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#ask-yes").addEventListener("click", () => closeAsk(true));
 });
 
-/** Simple one-line text prompt, used for new customers and products. */
-function askForText(title, handler) {
+/** Small dialog for adding a customer or a product without leaving the form. */
+function askForText(title, fields, handler) {
   const wrap = document.createElement("div");
   wrap.className = "ask-wrap";
   wrap.innerHTML =
     '<div class="sheet-backdrop"></div>' +
-    '<div class="ask" role="dialog" aria-modal="true">' +
+    '<div class="ask ask-form" role="dialog" aria-modal="true">' +
       '<p class="ask-text">' + escapeHTML(title) + "</p>" +
-      '<div class="field"><input type="text" autocapitalize="words" placeholder="Name"></div>' +
+      fields.map((f) =>
+        '<div class="field"><label>' + escapeHTML(f.label) + "</label>" +
+        '<input data-id="' + f.id + '" type="text" ' +
+        (f.money ? 'inputmode="decimal" placeholder="0.00"' : 'autocapitalize="words"') +
+        "></div>").join("") +
       '<div class="ask-btns">' +
         '<button class="btn btn-quiet" data-no>Cancel</button>' +
         '<button class="btn btn-primary" data-yes>Add</button>' +
       "</div>" +
     "</div>";
   document.body.appendChild(wrap);
-  const input = $("input", wrap);
-  setTimeout(() => input.focus(), 60);
+  const inputs = $$("input", wrap);
+  setTimeout(() => inputs[0].focus(), 60);
 
-  const done = (value) => { wrap.remove(); if (value != null) handler(value); };
+  const collect = () => {
+    const values = {};
+    inputs.forEach((i) => { values[i.dataset.id] = i.value; });
+    return values;
+  };
+  const done = (values) => { wrap.remove(); if (values) handler(values); };
   $("[data-no]", wrap).addEventListener("click", () => done(null));
   $(".sheet-backdrop", wrap).addEventListener("click", () => done(null));
-  $("[data-yes]", wrap).addEventListener("click", () => done(input.value));
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") done(input.value); });
+  $("[data-yes]", wrap).addEventListener("click", () => done(collect()));
+  inputs.forEach((i) => i.addEventListener("keydown", (e) => { if (e.key === "Enter") done(collect()); }));
 }
 
 let toastTimer = null;
@@ -1191,9 +1385,14 @@ function exportSpreadsheets(period) {
 
   if (data.sales.length) {
     later(() => csvFile("nanies-sales-" + tag + "-" + stamp + ".csv",
-      ["Date", "Customer", "Product", "Amount", "Status", "Received", "Outstanding", "Method", "Note"],
+      ["Date", "Customer", "Product", "Units", "Price each", "Cost each", "Amount",
+       "Cost total", "Profit", "Status", "Received", "Outstanding", "Method", "Note"],
       data.sales.map((s) => [
-        s.date, s.customer, s.product, Number(s.amount || 0).toFixed(2),
+        s.date, s.customer, s.product, tidyUnits(s.units),
+        Number(s.unit_price || 0).toFixed(2), Number(s.unit_cost || 0).toFixed(2),
+        Number(s.amount || 0).toFixed(2),
+        (Number(s.unit_cost || 0) * Number(s.units || 0)).toFixed(2),
+        saleProfit(s).toFixed(2),
         (SALE_STATUS[s.status] || {}).label || s.status,
         Number(s.amount_received || 0).toFixed(2),
         (Number(s.amount || 0) - Number(s.amount_received || 0)).toFixed(2),
@@ -1266,6 +1465,8 @@ function exportStatement(period) {
   };
 
   const salesTotal = data.sales.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+  const profitTotal = data.sales.reduce((sum, r) => sum + saleProfit(r), 0);
+  const unitsTotal = data.sales.reduce((sum, r) => sum + Number(r.units || 0), 0);
   const purchasesTotal = data.purchases.reduce((sum, r) => sum + Number(r.amount || 0), 0);
 
   let html =
@@ -1277,14 +1478,21 @@ function exportStatement(period) {
       "<tr><td>In the bank</td><td class=\"num\">" + money(t.bank) + "</td></tr>" +
       "<tr><td>Owed to us by customers</td><td class=\"num\">" + money(t.owedToUs) + "</td></tr>" +
       "<tr><td>Owed by us to suppliers</td><td class=\"num\">" + money(t.weOwe) + "</td></tr>" +
+      "<tr><td>Units sold in this period</td><td class=\"num\">" + tidyUnits(unitsTotal) + "</td></tr>" +
       "<tr><td>Sales in this period</td><td class=\"num\">" + money(salesTotal) + "</td></tr>" +
+      "<tr><td>What those sales cost to make</td><td class=\"num\">" +
+        money(salesTotal - profitTotal) + "</td></tr>" +
+      "<tr><td><strong>Profit on sales</strong></td><td class=\"num\"><strong>" +
+        money(profitTotal) + "</strong></td></tr>" +
       "<tr><td>Purchases in this period</td><td class=\"num\">" + money(purchasesTotal) + "</td></tr>" +
       "<tr><td><strong>Sales less purchases</strong></td><td class=\"num\"><strong>" +
         money(salesTotal - purchasesTotal) + "</strong></td></tr>" +
     "</tbody></table>";
 
-  html += table("Sales", ["Date", "Customer", "Product", "Amount", "Received", "Status"],
-    data.sales.map((s) => [niceDate(s.date), s.customer, s.product, money(s.amount),
+  html += table("Sales",
+    ["Date", "Customer", "Product", "Units", "Each", "Amount", "Profit", "Received", "Status"],
+    data.sales.map((s) => [niceDate(s.date), s.customer, s.product, tidyUnits(s.units),
+      money(s.unit_price), money(s.amount), money(saleProfit(s)),
       money(s.amount_received), (SALE_STATUS[s.status] || {}).label || s.status]));
 
   html += table("Purchases", ["Date", "Item", "Supplier", "Amount", "Status"],

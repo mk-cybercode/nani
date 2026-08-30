@@ -43,16 +43,35 @@ It then opens full screen with its own icon, like an app.
 ## Using it
 
 - **Home** shows cash on hand, money in the bank, what customers owe you, what
-  you owe suppliers, and net income for the current month, then the latest few
+  you owe suppliers, and the profit for the current month, then the latest few
   entries. Tap any entry to open it.
-- **Sales**, **Purchases** and **Stock** are lists, newest first, with a **+**
-  button. Tap a row to edit or delete it. Each list filters by This month,
-  Last month or All.
+- **Products & prices** (button on Home) is where each product gets what one
+  unit costs you to make and what you normally sell one for. Set these first —
+  the profit on every sale is worked out from them.
+- **Sales** asks who you sold to, which product, how many units and the price
+  for one. The price fills in from the product automatically and can be changed
+  for that sale. The total and the profit appear as you type, before you save.
+  Then: have they paid (Paid / Part paid / Not paid) and how (Cash or EFT).
+- **Purchases** and **Stock** work the same way — a list newest first with a
+  **+** button. Tap any row to edit or delete it. Each list filters by This
+  month, Last month or All.
 - **Adjust cash or bank** (on Home) is how you force a balance to match
   reality — money banked, money drawn, an opening float or a correction. It
   shows you what the balance will be before you save.
 - **New customers and products** are added from inside the sales and stock
   forms, with the **＋ New** button next to the dropdown.
+
+### How the profit is worked out
+
+    Profit on a sale = (price for one − what one cost you) × units sold
+
+The cost is copied onto the sale when you capture it, so changing a product's
+cost price later never rewrites sales you already saved. If a product has no
+cost price, the sale still saves but the form says the profit cannot be worked
+out until you set one.
+
+Purchases are kept separate from this. Cost price answers "what does one jar
+cost me to make"; purchases record the actual money going out of the account.
 
 ### How the balances are worked out
 
