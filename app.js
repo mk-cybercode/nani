@@ -193,6 +193,9 @@ function watchConnection() {
   const paint = () => { banner.hidden = navigator.onLine; };
   window.addEventListener("online", () => { paint(); loadAll(); });
   window.addEventListener("offline", paint);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && navigator.onLine) loadAll();
+  });
   paint();
 }
 
@@ -241,7 +244,7 @@ function listenForChanges() {
 function friendlyError(err) {
   const msg = (err && (err.message || err.hint)) || "";
   if (/Failed to fetch|NetworkError/i.test(msg)) return "No internet.";
-  if (/row-level security/i.test(msg)) return "The database is refusing writes — re-run schema.sql.";
+  if (/row-level security/i.test(msg)) return "The database is blocking access — run schema.sql again.";
   return msg;
 }
 
@@ -297,12 +300,8 @@ function render() {
   if (state.screen === "sales")     { screen.innerHTML = salesScreen();     wireList("sales");     return; }
   if (state.screen === "purchases") { screen.innerHTML = purchasesScreen(); wireList("purchases"); return; }
   if (state.screen === "stock")     { screen.innerHTML = stockScreen();     wireList("stock");     return; }
-  screen.innerHTML = soonScreen("Home");
-}
-
-function soonScreen(name) {
-  return '<div class="card"><div class="empty"><span class="empty-big">🛠</span>' +
-         escapeHTML(name) + " is being built next.</div></div>";
+  screen.innerHTML = homeScreen();
+  wireHome();
 }
 
 function emptyBox(message) {
@@ -454,6 +453,228 @@ function editSale(sale) {
 
   wirePickers();
   if (!isNew) wireDelete("this sale", () => remove("sales", s.id));
+}
+
+
+/* ---------- what the money adds up to ---------- */
+
+/* Every adjustment kind, and what it does to each balance. */
+const ADJUST_KINDS = {
+  banked:   { label: "Cash banked",        long: "Cash banked (cash → bank)",        cash: -1, bank: +1 },
+  drawn:    { label: "Money drawn",        long: "Money drawn (bank → cash)",        cash: +1, bank: -1 },
+  cash_in:  { label: "Cash in",            long: "Cash in (opening float, correction)", cash: +1, bank: 0 },
+  cash_out: { label: "Cash out",           long: "Cash out (money taken, correction)",  cash: -1, bank: 0 },
+  bank_in:  { label: "Into the bank",      long: "Into the bank (correction)",       cash: 0,  bank: +1 },
+  bank_out: { label: "Out of the bank",    long: "Out of the bank (correction)",     cash: 0,  bank: -1 }
+};
+
+function totals() {
+  let cash = 0, bank = 0;
+
+  // money actually received on sales
+  db.sales.forEach((s) => {
+    const received = Number(s.amount_received || 0);
+    if (s.method === "eft") bank += received; else cash += received;
+  });
+
+  // money actually paid out on purchases
+  db.purchases.forEach((p) => {
+    if (p.status !== "paid") return;
+    const amount = Number(p.amount || 0);
+    if (p.method === "eft") bank -= amount; else cash -= amount;
+  });
+
+  // manual corrections and movements
+  db.adjustments.forEach((a) => {
+    const rule = ADJUST_KINDS[a.kind];
+    if (!rule) return;
+    const amount = Number(a.amount || 0);
+    cash += rule.cash * amount;
+    bank += rule.bank * amount;
+  });
+
+  const owedToUs = db.sales.reduce((sum, s) =>
+    sum + Math.max(0, Number(s.amount || 0) - Number(s.amount_received || 0)), 0);
+
+  const weOwe = db.purchases.reduce((sum, p) =>
+    sum + (p.status === "unpaid" ? Number(p.amount || 0) : 0), 0);
+
+  const month = filterRange("this");
+  const salesMonth = db.sales.filter((s) => inRange(s.date, month))
+    .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+  const purchasesMonth = db.purchases.filter((p) => inRange(p.date, month))
+    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+  return {
+    cash: cash, bank: bank, owedToUs: owedToUs, weOwe: weOwe,
+    salesMonth: salesMonth, purchasesMonth: purchasesMonth,
+    netMonth: salesMonth - purchasesMonth
+  };
+}
+
+function thisMonthName() {
+  const now = new Date();
+  return MONTHS[now.getMonth()] + " " + now.getFullYear();
+}
+
+
+/* ---------- home ---------- */
+
+function homeScreen() {
+  if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+  const t = totals();
+
+  const tile = (label, value, tone) =>
+    '<div class="tile' + (tone ? " tile-" + tone : "") + '">' +
+      '<div class="tile-label">' + escapeHTML(label) + "</div>" +
+      '<div class="tile-value">' + money(value) + "</div>" +
+    "</div>";
+
+  let html =
+    '<div class="tiles">' +
+      tile("Cash on hand", t.cash) +
+      tile("In the bank", t.bank) +
+    "</div>" +
+    '<div class="tiles">' +
+      tile("Owed to us", t.owedToUs, t.owedToUs > 0 ? "warn" : null) +
+      tile("We still owe", t.weOwe, t.weOwe > 0 ? "bad" : null) +
+    "</div>" +
+    '<div class="tile tile-wide' + (t.netMonth < 0 ? " tile-bad" : " tile-good") + '">' +
+      '<div class="tile-label">Net income · ' + thisMonthName() + "</div>" +
+      '<div class="tile-value">' + money(t.netMonth) + "</div>" +
+      '<div class="tile-foot">' + money(t.salesMonth) + " in · " + money(t.purchasesMonth) + " out</div>" +
+    "</div>" +
+    '<button class="btn btn-block" id="h-adjust" style="margin-top:16px">Adjust cash or bank</button>' +
+    '<button class="btn btn-block" id="h-export" style="margin-top:10px">Export for the bookkeeper</button>';
+
+  const recent = recentEntries(6);
+  html += '<div class="section-head"><span>Latest entries</span></div>';
+  if (!recent.length) {
+    html += emptyBox("Nothing captured yet. Use the + button on Sales, Purchases or Stock.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  recent.forEach((e) => {
+    html +=
+      '<button class="row" data-entry="' + e.kind + ":" + e.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(e.title) + "</div>" +
+          '<div class="row-sub">' + escapeHTML(e.sub) + "</div>" +
+        "</div>" +
+        '<div class="row-side"><div class="row-amt ' + (e.tone || "") + '">' + e.amountText + "</div></div>" +
+      "</button>";
+  });
+  html += "</div>";
+  return html;
+}
+
+/** The newest few entries across sales, purchases, stock and adjustments. */
+function recentEntries(limit) {
+  const list = [];
+
+  db.sales.forEach((s) => list.push({
+    kind: "sale", id: s.id, when: s.created_at || s.date,
+    title: s.customer + " · " + s.product,
+    sub: "Sale · " + shortDate(s.date) + " · " + (s.method === "eft" ? "EFT" : "Cash"),
+    amountText: "+" + money(s.amount), tone: "amt-good"
+  }));
+
+  db.purchases.forEach((p) => list.push({
+    kind: "purchase", id: p.id, when: p.created_at || p.date,
+    title: p.item + (p.supplier ? " · " + p.supplier : ""),
+    sub: "Purchase · " + shortDate(p.date) + " · " + (p.method === "eft" ? "EFT" : "Cash"),
+    amountText: "-" + money(p.amount), tone: "amt-bad"
+  }));
+
+  db.stock.forEach((o) => list.push({
+    kind: "stock", id: o.id, when: o.created_at || o.date_ordered,
+    title: o.product + " · " + o.customer,
+    sub: "Stock order · " + shortDate(o.date_ordered),
+    amountText: tidyUnits(o.qty_delivered) + " / " + tidyUnits(o.qty_ordered)
+  }));
+
+  db.adjustments.forEach((a) => {
+    const rule = ADJUST_KINDS[a.kind] || { label: a.kind };
+    list.push({
+      kind: "adjustment", id: a.id, when: a.created_at || a.date,
+      title: rule.label,
+      sub: "Adjustment · " + shortDate(a.date) + (a.note ? " · " + a.note : ""),
+      amountText: money(a.amount)
+    });
+  });
+
+  list.sort((a, b) => String(b.when).localeCompare(String(a.when)));
+  return list.slice(0, limit);
+}
+
+function wireHome() {
+  const adjust = $("#h-adjust");
+  if (adjust) adjust.addEventListener("click", () => editAdjustment(null));
+  const exportBtn = $("#h-export");
+  if (exportBtn) exportBtn.addEventListener("click", openExport);
+
+  $$("[data-entry]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const [kind, id] = row.dataset.entry.split(":");
+      if (kind === "sale")       editSale(db.sales.find((r) => r.id === id));
+      if (kind === "purchase")   editPurchase(db.purchases.find((r) => r.id === id));
+      if (kind === "stock")      editStock(db.stock.find((r) => r.id === id));
+      if (kind === "adjustment") editAdjustment(db.adjustments.find((r) => r.id === id));
+    });
+  });
+}
+
+
+/* ---------- cash and bank adjustments ---------- */
+
+function editAdjustment(adjustment) {
+  const isNew = !adjustment;
+  const a = adjustment || { date: todayISO(), kind: "banked", amount: "", note: "" };
+  const t = totals();
+
+  const options = Object.keys(ADJUST_KINDS).map((key) =>
+    '<option value="' + key + '"' + (key === a.kind ? " selected" : "") + ">" +
+    escapeHTML(ADJUST_KINDS[key].long) + "</option>").join("");
+
+  const body =
+    '<p class="field-hint" style="text-align:center;margin-bottom:16px">Right now: cash <strong>' +
+      money(t.cash) + "</strong> · bank <strong>" + money(t.bank) + "</strong></p>" +
+    field("Date", '<input id="f-date" type="date" value="' + escapeHTML(a.date) + '">') +
+    field("What happened", '<select id="f-kind">' + options + "</select>") +
+    field("Amount", amountInput("f-amount", a.amount)) +
+    field("Note", '<textarea id="f-note" placeholder="Why the figure is being changed">' +
+                  escapeHTML(a.note || "") + "</textarea>") +
+    '<p id="f-effect" class="field-hint" style="text-align:center;font-size:15px"></p>' +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "Adjust cash or bank" : "Edit adjustment", body, async () => {
+    const amount = toNum($("#f-amount").value);
+    if (amount <= 0) { toast("Enter an amount."); return false; }
+    const row = {
+      date: $("#f-date").value || todayISO(),
+      kind: $("#f-kind").value,
+      amount: amount,
+      note: $("#f-note").value.trim() || null
+    };
+    const ok = await save("adjustments", row, isNew ? null : a.id);
+    if (ok) toast(isNew ? "Adjustment saved." : "Adjustment updated.");
+    return ok;
+  });
+
+  const showEffect = () => {
+    const rule = ADJUST_KINDS[$("#f-kind").value];
+    const amount = toNum($("#f-amount").value);
+    const parts = [];
+    if (rule.cash) parts.push("cash " + money(t.cash + rule.cash * amount));
+    if (rule.bank) parts.push("bank " + money(t.bank + rule.bank * amount));
+    $("#f-effect").innerHTML = "After saving: <strong>" + parts.join(" · ") + "</strong>";
+  };
+  $("#f-kind").addEventListener("change", showEffect);
+  $("#f-amount").addEventListener("input", showEffect);
+  showEffect();
+
+  if (!isNew) wireDelete("this adjustment", () => remove("adjustments", a.id));
 }
 
 
@@ -889,13 +1110,214 @@ function toast(message) {
 }
 
 
+/* ---------- export ---------- */
+
+const EXPORT_LABELS = { this: "this month", last: "last month", all: "all time" };
+
+function openExport() {
+  const body =
+    '<p class="field-hint" style="margin-bottom:14px">Choose a period, then a format. ' +
+    'The file is saved to this phone and can be emailed or shared from there.</p>' +
+    field("Period", choice("f-period", [
+      ["this", "This month"], ["last", "Last month"], ["all", "All"]
+    ], "this")) +
+    '<button type="button" class="btn btn-primary btn-block" id="x-excel" style="margin-bottom:10px">' +
+      "Spreadsheet (Excel / CSV)</button>" +
+    '<button type="button" class="btn btn-block" id="x-pdf" style="margin-bottom:10px">' +
+      "Statement (PDF)</button>" +
+    '<p class="field-hint">The spreadsheet downloads one file per list: sales, purchases, ' +
+    'stock orders and cash adjustments. The PDF opens your phone’s print screen — ' +
+    'choose <strong>Save as PDF</strong>.</p>';
+
+  openSheet("Export", body, async () => true);
+  $("#x-excel").addEventListener("click", () => exportSpreadsheets(choiceValue("f-period")));
+  $("#x-pdf").addEventListener("click", () => exportStatement(choiceValue("f-period")));
+}
+
+function csvCell(value) {
+  const text = value == null ? "" : String(value);
+  return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+function csvFile(name, header, rows) {
+  const lines = [header].concat(rows).map((r) => r.map(csvCell).join(","));
+  // BOM so Excel opens accented names and the R sign correctly
+  download(name, "﻿" + lines.join("\r\n"), "text/csv;charset=utf-8");
+}
+
+function download(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function exportData(period) {
+  const range = filterRange(period);
+  return {
+    range: range,
+    sales:       db.sales.filter((r) => inRange(r.date, range)),
+    purchases:   db.purchases.filter((r) => inRange(r.date, range)),
+    stock:       db.stock.filter((r) => inRange(r.date_ordered, range)),
+    adjustments: db.adjustments.filter((r) => inRange(r.date, range))
+  };
+}
+
+function exportSpreadsheets(period) {
+  const data = exportData(period);
+  const stamp = todayISO();
+  const tag = period === "all" ? "all" : period + "-month";
+  let files = 0;
+
+  const later = (fn, delay) => setTimeout(fn, delay); // phones ignore rapid-fire downloads
+
+  if (data.sales.length) {
+    later(() => csvFile("nanies-sales-" + tag + "-" + stamp + ".csv",
+      ["Date", "Customer", "Product", "Amount", "Status", "Received", "Outstanding", "Method", "Note"],
+      data.sales.map((s) => [
+        s.date, s.customer, s.product, Number(s.amount || 0).toFixed(2),
+        (SALE_STATUS[s.status] || {}).label || s.status,
+        Number(s.amount_received || 0).toFixed(2),
+        (Number(s.amount || 0) - Number(s.amount_received || 0)).toFixed(2),
+        s.method === "eft" ? "EFT" : "Cash", s.note || ""
+      ])), files++ * 350);
+  }
+
+  if (data.purchases.length) {
+    later(() => csvFile("nanies-purchases-" + tag + "-" + stamp + ".csv",
+      ["Date", "Item", "Supplier", "Amount", "Status", "Method", "Note"],
+      data.purchases.map((p) => [
+        p.date, p.item, p.supplier || "", Number(p.amount || 0).toFixed(2),
+        p.status === "paid" ? "Paid" : "Not paid",
+        p.method === "eft" ? "EFT" : "Cash", p.note || ""
+      ])), files++ * 350);
+  }
+
+  if (data.stock.length) {
+    later(() => csvFile("nanies-stock-orders-" + tag + "-" + stamp + ".csv",
+      ["Date ordered", "Product", "Customer", "Units ordered", "Price per unit", "Value",
+       "Date delivered", "Units delivered", "Units outstanding", "Complete", "Note"],
+      data.stock.map((o) => [
+        o.date_ordered, o.product, o.customer, tidyUnits(o.qty_ordered),
+        Number(o.unit_price || 0).toFixed(2),
+        (Number(o.qty_ordered || 0) * Number(o.unit_price || 0)).toFixed(2),
+        o.date_delivered || "", tidyUnits(o.qty_delivered), tidyUnits(outstandingUnits(o)),
+        o.complete ? "Yes" : "No", o.note || ""
+      ])), files++ * 350);
+  }
+
+  if (data.adjustments.length) {
+    later(() => csvFile("nanies-cash-adjustments-" + tag + "-" + stamp + ".csv",
+      ["Date", "What happened", "Amount", "Effect on cash", "Effect on bank", "Note"],
+      data.adjustments.map((a) => {
+        const rule = ADJUST_KINDS[a.kind] || { label: a.kind, cash: 0, bank: 0 };
+        const amount = Number(a.amount || 0);
+        return [a.date, rule.label, amount.toFixed(2),
+                (rule.cash * amount).toFixed(2), (rule.bank * amount).toFixed(2), a.note || ""];
+      })), files++ * 350);
+  }
+
+  if (!files) { toast("Nothing to export for " + EXPORT_LABELS[period] + "."); return; }
+  toast(files === 1 ? "Downloading 1 file…" : "Downloading " + files + " files…");
+}
+
+/** Builds a printable statement and opens the phone's print / Save as PDF screen. */
+function exportStatement(period) {
+  const data = exportData(period);
+  const t = totals();
+  const heading = data.range
+    ? niceDate(data.range.from) + " to " + niceDate(data.range.to)
+    : "All entries to date";
+
+  // amounts and dates read better right-aligned and unwrapped on paper
+  const cell = (text) => {
+    const value = String(text == null ? "" : text);
+    const numeric = /^-?R\s/.test(value) || /^[\d.]+$/.test(value);
+    const dateLike = /^\d{1,2} [A-Z][a-z]{2} \d{4}$/.test(value);
+    const cls = numeric ? ' class="num"' : (dateLike ? ' class="nowrap"' : "");
+    return "<td" + cls + ">" + escapeHTML(value) + "</td>";
+  };
+
+  const table = (title, header, rows) => {
+    if (!rows.length) return "";
+    return "<h2>" + escapeHTML(title) + "</h2><table><thead><tr>" +
+      header.map((h) => "<th>" + escapeHTML(h) + "</th>").join("") +
+      "</tr></thead><tbody>" +
+      rows.map((r) => "<tr>" + r.map(cell).join("") + "</tr>").join("") +
+      "</tbody></table>";
+  };
+
+  const salesTotal = data.sales.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+  const purchasesTotal = data.purchases.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
+  let html =
+    "<h1>" + escapeHTML(CONFIG.BUSINESS_NAME) + "</h1>" +
+    '<p class="sub">Statement · ' + escapeHTML(heading) + "<br>Printed " + niceDate(todayISO()) + "</p>" +
+    "<h2>Where the money stands</h2>" +
+    "<table><tbody>" +
+      "<tr><td>Cash on hand</td><td class=\"num\">" + money(t.cash) + "</td></tr>" +
+      "<tr><td>In the bank</td><td class=\"num\">" + money(t.bank) + "</td></tr>" +
+      "<tr><td>Owed to us by customers</td><td class=\"num\">" + money(t.owedToUs) + "</td></tr>" +
+      "<tr><td>Owed by us to suppliers</td><td class=\"num\">" + money(t.weOwe) + "</td></tr>" +
+      "<tr><td>Sales in this period</td><td class=\"num\">" + money(salesTotal) + "</td></tr>" +
+      "<tr><td>Purchases in this period</td><td class=\"num\">" + money(purchasesTotal) + "</td></tr>" +
+      "<tr><td><strong>Sales less purchases</strong></td><td class=\"num\"><strong>" +
+        money(salesTotal - purchasesTotal) + "</strong></td></tr>" +
+    "</tbody></table>";
+
+  html += table("Sales", ["Date", "Customer", "Product", "Amount", "Received", "Status"],
+    data.sales.map((s) => [niceDate(s.date), s.customer, s.product, money(s.amount),
+      money(s.amount_received), (SALE_STATUS[s.status] || {}).label || s.status]));
+
+  html += table("Purchases", ["Date", "Item", "Supplier", "Amount", "Status"],
+    data.purchases.map((p) => [niceDate(p.date), p.item, p.supplier || "", money(p.amount),
+      p.status === "paid" ? "Paid" : "Not paid"]));
+
+  html += table("Stock orders", ["Ordered", "Product", "Customer", "Units", "Delivered", "Outstanding"],
+    data.stock.map((o) => [niceDate(o.date_ordered), o.product, o.customer,
+      tidyUnits(o.qty_ordered), tidyUnits(o.qty_delivered), tidyUnits(outstandingUnits(o))]));
+
+  html += table("Cash and bank adjustments", ["Date", "What happened", "Amount", "Note"],
+    data.adjustments.map((a) => [niceDate(a.date),
+      (ADJUST_KINDS[a.kind] || {}).label || a.kind, money(a.amount), a.note || ""]));
+
+  if (!data.sales.length && !data.purchases.length && !data.stock.length && !data.adjustments.length) {
+    html += "<p>No entries in this period.</p>";
+  }
+
+  let area = $("#print-area");
+  if (!area) {
+    area = document.createElement("div");
+    area.id = "print-area";
+    document.body.appendChild(area);
+  }
+  area.innerHTML = html;
+  closeSheet();
+  setTimeout(() => window.print(), 150);
+}
+
+
 /* ---------- overflow menu ---------- */
 
 function openMenu() {
   const body =
+    '<button type="button" class="btn btn-block" id="m-export" style="margin-bottom:10px">Export for the bookkeeper</button>' +
+    '<button type="button" class="btn btn-block" id="m-refresh" style="margin-bottom:10px">Refresh from the database</button>' +
     '<button type="button" class="btn btn-block" id="m-lock" style="margin-bottom:12px">Lock this device</button>' +
-    '<p class="field-hint">' + escapeHTML(CONFIG.BUSINESS_NAME) + " · all amounts in Rands.</p>";
+    '<p class="field-hint">' + escapeHTML(CONFIG.BUSINESS_NAME) + " · all amounts in Rands. " +
+    "The same data shows on every device that signs in with the passcode.</p>";
   openSheet("More", body, async () => true);
+  $("#m-export").addEventListener("click", openExport);
+  $("#m-refresh").addEventListener("click", async () => {
+    await loadAll();
+    closeSheet();
+    toast("Up to date.");
+  });
   $("#m-lock").addEventListener("click", lock);
 }
 

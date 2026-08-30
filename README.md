@@ -1,0 +1,100 @@
+# Nanie's Delicacies — recon tracker
+
+A small phone-first web app for tracking sales, purchases, stock orders and the
+cash and bank balances of Nanie's Delicacies. Everything is in Rands.
+
+Both partners open the same web address, type the shared passcode once, and see
+the same live figures. Any device works — an entry captured on one phone shows
+up on the other's within a second or two, and the app refreshes itself whenever
+it is brought back to the foreground.
+
+Three files, no build step, no framework: `index.html`, `app.js`, `styles.css`.
+
+## Getting it running
+
+1. **Database** — follow `SETUP.md`. It takes about ten minutes: make a free
+   Supabase project, run `schema.sql`, copy two keys.
+2. **Config** — open `app.js` and fill in the block at the very top:
+   `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `PASSCODE`.
+3. **Publish** — see below.
+
+## Putting it online for free
+
+The repository already holds the whole app, so GitHub Pages can serve it as-is.
+
+1. On GitHub go to this repository → **Settings** → **Pages**.
+2. Under **Build and deployment** → **Source**, choose **Deploy from a branch**.
+3. Branch: **main**, folder: **/ (root)**. Click **Save**.
+4. Wait a minute, then reload the page. It shows your address:
+
+       https://mk-cybercode.github.io/nani/
+
+5. Open that address on both phones and enter the passcode.
+
+Every time you push a change to `main`, the live site updates within a minute.
+
+### Add it to a phone home screen
+
+- **iPhone (Safari):** open the link → Share button → **Add to Home Screen**.
+- **Android (Chrome):** open the link → ⋮ menu → **Add to Home screen**.
+
+It then opens full screen with its own icon, like an app.
+
+## Using it
+
+- **Home** shows cash on hand, money in the bank, what customers owe you, what
+  you owe suppliers, and net income for the current month, then the latest few
+  entries. Tap any entry to open it.
+- **Sales**, **Purchases** and **Stock** are lists, newest first, with a **+**
+  button. Tap a row to edit or delete it. Each list filters by This month,
+  Last month or All.
+- **Adjust cash or bank** (on Home) is how you force a balance to match
+  reality — money banked, money drawn, an opening float or a correction. It
+  shows you what the balance will be before you save.
+- **New customers and products** are added from inside the sales and stock
+  forms, with the **＋ New** button next to the dropdown.
+
+### How the balances are worked out
+
+    Cash on hand = cash received on sales
+                 − cash paid on purchases
+                 + cash adjustments (float, drawn, corrections)
+                 − cash banked
+
+    In the bank  = EFT received on sales
+                 − EFT paid on purchases
+                 + cash banked
+                 + bank adjustments − money drawn
+
+Unpaid sales and unpaid purchases do not move these balances. They appear as
+**Owed to us** and **We still owe** instead.
+
+## Export for the bookkeeper
+
+Under **Export for the bookkeeper** on Home (also in the ⋯ menu), pick a period
+and a format:
+
+- **Spreadsheet (Excel / CSV)** — one file per list: sales, purchases, stock
+  orders and cash adjustments. They open straight in Excel, Numbers or Google
+  Sheets.
+- **Statement (PDF)** — opens the phone's print screen. Choose **Save as PDF**
+  (iPhone: pinch out on the preview, then Share → Save to Files). It prints the
+  balances, then every entry for the period as a plain table.
+
+## Things worth knowing
+
+- The passcode keeps a forwarded link from being opened by a stranger. It is not
+  real security: anyone with the web address can read the page source and reach
+  the database. Keep the link between the two of you. If you ever want proper
+  logins, they can be added without losing any data.
+- Offline, the app says so at the top of the screen and refuses to save rather
+  than pretending. Get back onto data and save again.
+- Deleting anything asks first, and cannot be undone.
+
+## Files
+
+    index.html    the page
+    app.js        all the behaviour; config block at the top
+    styles.css    all the styling, including the printed statement
+    schema.sql    run once in the Supabase SQL editor
+    SETUP.md      click-by-click Supabase setup
