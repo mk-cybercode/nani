@@ -1,0 +1,175 @@
+-- ============================================================
+--  Nanie's Delicacies - recon tracker
+--  Run this whole file once in the Supabase SQL editor.
+--  Safe to re-run: it only creates things that are missing.
+-- ============================================================
+
+create extension if not exists "pgcrypto";
+
+-- ---------- Lists you can add to from inside the app ----------
+
+create table if not exists customers (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists products (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique,
+  created_at timestamptz not null default now()
+);
+
+-- ---------- Sales / income ----------
+
+create table if not exists sales (
+  id              uuid primary key default gen_random_uuid(),
+  date            date not null default current_date,
+  customer        text not null,
+  product         text not null,
+  amount          numeric(12,2) not null default 0,   -- full price of the sale
+  status          text not null default 'unpaid'      -- paid | part | unpaid
+                  check (status in ('paid','part','unpaid')),
+  amount_received numeric(12,2) not null default 0,   -- how much has actually come in
+  method          text not null default 'cash'        -- cash | eft
+                  check (method in ('cash','eft')),
+  note            text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+-- ---------- Purchases / expenses ----------
+
+create table if not exists purchases (
+  id         uuid primary key default gen_random_uuid(),
+  date       date not null default current_date,
+  item       text not null,
+  supplier   text,
+  amount     numeric(12,2) not null default 0,
+  status     text not null default 'unpaid'          -- paid | unpaid
+             check (status in ('paid','unpaid')),
+  method     text not null default 'cash'            -- cash | eft
+             check (method in ('cash','eft')),
+  note       text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- ---------- Stock orders ----------
+-- outstanding = qty_ordered - qty_delivered, worked out by the database.
+
+create table if not exists stock_orders (
+  id             uuid primary key default gen_random_uuid(),
+  product        text not null,
+  customer       text not null,
+  date_ordered   date not null default current_date,
+  qty_ordered    numeric(12,2) not null default 0,
+  date_delivered date,
+  qty_delivered  numeric(12,2) not null default 0,
+  complete       boolean not null default false,
+  note           text,
+  outstanding    numeric(12,2) generated always as (qty_ordered - qty_delivered) stored,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+
+-- ---------- Manual cash / bank adjustments ----------
+-- kind decides which balance moves and in which direction:
+--   banked    cash -> bank      (you deposited takings)
+--   drawn     bank -> cash      (you withdrew money)
+--   cash_in   cash + (opening float, correction up)
+--   cash_out  cash - (money taken out, correction down)
+--   bank_in   bank + (correction up)
+--   bank_out  bank - (correction down)
+
+create table if not exists adjustments (
+  id         uuid primary key default gen_random_uuid(),
+  date       date not null default current_date,
+  kind       text not null
+             check (kind in ('banked','drawn','cash_in','cash_out','bank_in','bank_out')),
+  amount     numeric(12,2) not null default 0,
+  note       text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- ---------- Keep updated_at honest ----------
+
+create or replace function set_updated_at() returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_sales_updated        on sales;
+drop trigger if exists trg_purchases_updated    on purchases;
+drop trigger if exists trg_stock_orders_updated on stock_orders;
+drop trigger if exists trg_adjustments_updated  on adjustments;
+
+create trigger trg_sales_updated        before update on sales        for each row execute function set_updated_at();
+create trigger trg_purchases_updated    before update on purchases    for each row execute function set_updated_at();
+create trigger trg_stock_orders_updated before update on stock_orders for each row execute function set_updated_at();
+create trigger trg_adjustments_updated  before update on adjustments  for each row execute function set_updated_at();
+
+-- ---------- Indexes (lists are always newest first) ----------
+
+create index if not exists idx_sales_date        on sales (date desc, created_at desc);
+create index if not exists idx_purchases_date    on purchases (date desc, created_at desc);
+create index if not exists idx_stock_date        on stock_orders (date_ordered desc, created_at desc);
+create index if not exists idx_adjustments_date  on adjustments (date desc, created_at desc);
+
+-- ---------- Starting lists ----------
+
+insert into customers (name) values ('Forsmay Butchery'), ('Freezer Fillers')
+  on conflict (name) do nothing;
+
+insert into products (name) values ('Green Chutney'), ('Sesame Crunch Oil')
+  on conflict (name) do nothing;
+
+-- ============================================================
+--  Access
+--  The app talks to Supabase with the public "anon" key, and
+--  there are no user accounts, so the anon role needs to be
+--  able to read and write these six tables.
+--  Row Level Security stays ON (Supabase will nag otherwise)
+--  with one open policy per table.
+--  Be clear-eyed about what this means: anyone who has your
+--  site URL AND your anon key can read and write this data.
+--  The passcode screen in the app does not change that - it
+--  only stops a stray link being opened by the wrong person.
+-- ============================================================
+
+alter table customers    enable row level security;
+alter table products     enable row level security;
+alter table sales        enable row level security;
+alter table purchases    enable row level security;
+alter table stock_orders enable row level security;
+alter table adjustments  enable row level security;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['customers','products','sales','purchases','stock_orders','adjustments']
+  loop
+    execute format('drop policy if exists "app access" on %I', t);
+    execute format(
+      'create policy "app access" on %I for all to anon, authenticated using (true) with check (true)', t);
+  end loop;
+end $$;
+
+-- ---------- Live updates on both phones ----------
+-- Adds the tables to the realtime publication so one partner's
+-- entry appears on the other's phone without a refresh.
+
+do $$
+declare t text;
+begin
+  foreach t in array array['customers','products','sales','purchases','stock_orders','adjustments']
+  loop
+    begin
+      execute format('alter publication supabase_realtime add table %I', t);
+    exception when duplicate_object then null;
+    end;
+  end loop;
+end $$;
