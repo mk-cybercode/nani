@@ -196,6 +196,7 @@ function openApp() {
   sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
 
   wireChrome();
+  watchViewport();
   watchConnection();
   go("home");
   loadAll().then(listenForChanges);
@@ -219,6 +220,23 @@ function wireChrome() {
     if (e.target.dataset.askClose) closeAsk(false);
   });
   $("#ask-no").addEventListener("click", () => closeAsk(false));
+}
+
+/** Keeps --seen-height on the page equal to the part of the screen a
+ *  phone is really showing (browser bars and keyboard taken off). */
+function watchViewport() {
+  const vv = window.visualViewport;
+  const apply = () => {
+    const height = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty("--seen-height", height + "px");
+  };
+  if (vv) {
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+  }
+  window.addEventListener("resize", apply);
+  window.addEventListener("orientationchange", () => setTimeout(apply, 250));
+  apply();
 }
 
 function watchConnection() {
@@ -1224,9 +1242,32 @@ function onChoice(id, handler) {
 
 let onSave = null;
 
-function openSheet(title, bodyHTML, handler) {
+/**
+ * saveLabel null means the form has its own buttons (Export, More) — no
+ * Save is shown at all. Otherwise a Save sits in the header AND at the
+ * foot of the form, so it is reachable even when a phone's browser bars
+ * cover the top of the sheet.
+ */
+function openSheet(title, bodyHTML, handler, saveLabel) {
+  const label = (saveLabel === undefined) ? "Save" : saveLabel;
   $("#sheet-title").textContent = title;
   $("#sheet-body").innerHTML = bodyHTML;
+  $("#sheet-save").hidden = (label === null);
+  if (label) $("#sheet-save").textContent = label;
+
+  if (label) {
+    const foot = document.createElement("div");
+    foot.className = "sheet-foot";
+    foot.innerHTML =
+      '<button type="button" class="btn btn-primary btn-block" data-save>' + escapeHTML(label) + "</button>" +
+      '<button type="button" class="btn btn-quiet btn-block" data-close="1">Cancel</button>';
+    const body = $("#sheet-body");
+    const deleteBtn = $("#f-delete", body);      // keep Delete last, well away from Save
+    if (deleteBtn) body.insertBefore(foot, deleteBtn); else body.appendChild(foot);
+    $("[data-save]", foot).addEventListener("click", saveSheet);
+    $('[data-close]', foot).addEventListener("click", closeSheet);
+  }
+
   $("#sheet").hidden = false;
   document.body.style.overflow = "hidden";
   onSave = handler;
@@ -1239,15 +1280,20 @@ function closeSheet() {
   onSave = null;
 }
 
+let saving = false;
+
+async function saveSheet() {
+  if (!onSave || saving) return;
+  saving = true;
+  $$("#sheet-save, .sheet-foot [data-save]").forEach((b) => { b.disabled = true; });
+  const ok = await onSave();
+  saving = false;
+  $$("#sheet-save, .sheet-foot [data-save]").forEach((b) => { b.disabled = false; });
+  if (ok) closeSheet();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  $("#sheet-save").addEventListener("click", async () => {
-    if (!onSave) return;
-    const btn = $("#sheet-save");
-    btn.disabled = true;
-    const ok = await onSave();
-    btn.disabled = false;
-    if (ok) closeSheet();
-  });
+  $("#sheet-save").addEventListener("click", saveSheet);
 });
 
 
@@ -1336,7 +1382,7 @@ function openExport() {
     'stock orders and cash adjustments. The PDF opens your phone’s print screen — ' +
     'choose <strong>Save as PDF</strong>.</p>';
 
-  openSheet("Export", body, async () => true);
+  openSheet("Export", body, async () => true, null);
   $("#x-excel").addEventListener("click", () => exportSpreadsheets(choiceValue("f-period")));
   $("#x-pdf").addEventListener("click", () => exportStatement(choiceValue("f-period")));
 }
@@ -1532,7 +1578,7 @@ function openMenu() {
     '<button type="button" class="btn btn-block" id="m-lock" style="margin-bottom:12px">Lock this device</button>' +
     '<p class="field-hint">' + escapeHTML(CONFIG.BUSINESS_NAME) + " · all amounts in Rands. " +
     "The same data shows on every device that signs in with the passcode.</p>";
-  openSheet("More", body, async () => true);
+  openSheet("More", body, async () => true, null);
   $("#m-export").addEventListener("click", openExport);
   $("#m-refresh").addEventListener("click", async () => {
     await loadAll();
