@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14532d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nanie's">
+<title>Nanie's Delicacies</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Passcode screen -->
+<div id="gate" class="gate" hidden>
+  <div class="gate-inner">
+    <h1 class="gate-title">Nanie's Delicacies</h1>
+    <p class="gate-sub">Enter the passcode</p>
+    <input id="gate-input" class="gate-input" type="password" inputmode="numeric"
+           autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Passcode">
+    <p id="gate-error" class="gate-error" hidden>That passcode is not right.</p>
+    <button id="gate-btn" class="btn btn-primary btn-block">Open</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app" class="app" hidden>
+  <div id="offline" class="offline" hidden>No internet — changes will not save yet.</div>
+  <header class="topbar">
+    <h1 id="title" class="topbar-title">Home</h1>
+    <button id="menu-btn" class="topbar-action" aria-label="More">⋯</button>
+  </header>
+
+  <main id="screen" class="screen"></main>
+
+  <button id="fab" class="fab" hidden aria-label="Add">+</button>
+
+  <nav class="tabbar">
+    <button class="tab" data-nav="home"><span class="tab-ico">⌂</span><span>Home</span></button>
+    <button class="tab" data-nav="sales"><span class="tab-ico">↑</span><span>Sales</span></button>
+    <button class="tab" data-nav="purchases"><span class="tab-ico">↓</span><span>Purchases</span></button>
+    <button class="tab" data-nav="stock"><span class="tab-ico">▤</span><span>Stock</span></button>
+  </nav>
+</div>
+
+<!-- Slide-up sheet used for every form -->
+<div id="sheet" class="sheet-wrap" hidden>
+  <div class="sheet-backdrop" data-close="1"></div>
+  <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <button class="sheet-cancel" data-close="1">Cancel</button>
+      <h2 id="sheet-title" class="sheet-title"></h2>
+      <button id="sheet-save" class="sheet-save">Save</button>
+    </div>
+    <div id="sheet-body" class="sheet-body"></div>
+  </section>
+</div>
+
+<!-- Confirm / message dialog -->
+<div id="ask" class="ask-wrap" hidden>
+  <div class="sheet-backdrop" data-ask-close="1"></div>
+  <div class="ask" role="alertdialog" aria-modal="true">
+    <p id="ask-text" class="ask-text"></p>
+    <div class="ask-btns">
+      <button id="ask-no" class="btn btn-quiet">Cancel</button>
+      <button id="ask-yes" class="btn btn-danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

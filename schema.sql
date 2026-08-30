@@ -56,6 +56,8 @@ create table if not exists purchases (
 );
 
 -- ---------- Stock orders ----------
+-- Quantities are in units (jars, bottles). unit_price is the rand value of
+-- one unit, so the rand value of an order is qty_ordered * unit_price.
 -- outstanding = qty_ordered - qty_delivered, worked out by the database.
 
 create table if not exists stock_orders (
@@ -63,7 +65,8 @@ create table if not exists stock_orders (
   product        text not null,
   customer       text not null,
   date_ordered   date not null default current_date,
-  qty_ordered    numeric(12,2) not null default 0,
+  qty_ordered    numeric(12,2) not null default 0,      -- number of units
+  unit_price     numeric(12,2) not null default 0,      -- rand value per unit
   date_delivered date,
   qty_delivered  numeric(12,2) not null default 0,
   complete       boolean not null default false,
@@ -72,6 +75,9 @@ create table if not exists stock_orders (
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
+
+-- If you ran an earlier version of this file, this adds the new column.
+alter table stock_orders add column if not exists unit_price numeric(12,2) not null default 0;
 
 -- ---------- Manual cash / bank adjustments ----------
 -- kind decides which balance moves and in which direction:
