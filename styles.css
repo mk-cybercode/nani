@@ -93,6 +93,8 @@ button { cursor: pointer; }
 }
 
 .screen { padding: var(--pad); max-width: 720px; margin: 0 auto; }
+/* leave room so the last row is never hidden behind the + button */
+.screen { padding-bottom: 86px; }
 
 /* ---------- Cards & lists ---------- */
 
@@ -187,6 +189,7 @@ button { cursor: pointer; }
   min-height: 58px;
 }
 .tab-ico { font-size: 21px; line-height: 1; }
+@media (max-width: 340px) { .tab { font-size: 11px; } }
 .tab[aria-current="page"] { color: var(--brand); }
 
 /* ---------- Sheet (forms) ---------- */

@@ -48,6 +48,13 @@ It then opens full screen with its own icon, like an app.
 - **Products & prices** (button on Home) is where each product gets what one
   unit costs you to make and what you normally sell one for. Set these first —
   the profit on every sale is worked out from them.
+- **Money** is the partners' tab. It shows what the business owes each of you
+  and where that came from, and it is where you capture money one of you puts
+  in from her own pocket, or money the business pays back. The same two figures
+  appear on Home.
+- **Stock** holds two lists behind a switch at the top: **On shelves** (stock
+  left at a shop that only gets paid for once it sells) and **Orders** (what a
+  customer ordered and what has been delivered).
 - **Sales** asks who you sold to, which product, how many units and the price
   for one. The price fills in from the product automatically and can be changed
   for that sale. The total and the profit appear as you type, before you save.
@@ -60,6 +67,23 @@ It then opens full screen with its own icon, like an app.
   shows you what the balance will be before you save.
 - **New customers and products** are added from inside the sales and stock
   forms, with the **＋ New** button next to the dropdown.
+
+### Who is owed what
+
+    Owed to a partner = purchases she paid for out of her own pocket
+                      + money she put in
+                      − money the business has paid back to her
+
+When you capture a purchase, **Who paid for this?** decides where the money
+came from: the business, one partner, or both (Split, where you type what the
+first partner put in and the rest falls to the other). A purchase a partner
+paid for does **not** come off the business's cash or bank — it becomes money
+owed to her instead, and only leaves the balance when she is paid back.
+
+Stock out on consignment records whose money is tied up in that batch, and the
+Money tab shows it as a separate line. It is deliberately **not** added to what
+she is owed: the ingredients were already captured as a purchase, and counting
+both would make the debt look twice as big as it is.
 
 ### How the profit is worked out
 

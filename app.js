@@ -5,12 +5,15 @@
    2. SUPABASE_ANON_KEY   the "anon public" key on the same page
       (never the service_role key)
    3. PASSCODE       whatever you and your partner will type in
+   4. PARTNERS       the two partners' names
    ============================================================ */
 const CONFIG = {
   SUPABASE_URL:      "https://ufiplsfnmabxyxsabqti.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVmaXBsc2ZubWFieHl4c2FicXRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxMTAxNjcsImV4cCI6MjEwMzY4NjE2N30.yB_hYbyslU_HcEsXdSZWxVtqpMuubLN4VGSK01uoup0",
   PASSCODE:          "9095",
-  BUSINESS_NAME:     "Nanie's Delicacies"
+  BUSINESS_NAME:     "Nanie's Delicacies",
+  // The two partners. Change a name here and it changes everywhere.
+  PARTNERS:          { p1: "Nazreen", p2: "Sumaya" }
 };
 /* ====================== end of config ====================== */
 
@@ -118,12 +121,16 @@ const db = {
   sales: [],
   purchases: [],
   stock: [],
-  adjustments: []
+  adjustments: [],
+  partnerMoney: [],
+  consignment: []
 };
 
 const state = {
   screen: "home",
-  filter: { sales: "this", purchases: "this", stock: "this" },
+  filter: { sales: "this", purchases: "this", stock: "this",
+            consignment: "all", money: "all" },
+  stockTab: "consignment",
   loaded: false
 };
 
@@ -209,7 +216,10 @@ function wireChrome() {
   $("#fab").addEventListener("click", () => {
     if (state.screen === "sales") editSale(null);
     if (state.screen === "purchases") editPurchase(null);
-    if (state.screen === "stock") editStock(null);
+    if (state.screen === "stock") {
+      if (state.stockTab === "orders") editStock(null); else editConsignment(null);
+    }
+    if (state.screen === "money") editPartnerMoney(null);
     if (state.screen === "products") editProduct(null);
   });
   $("#back-btn").addEventListener("click", () => go("home"));
@@ -256,16 +266,20 @@ function watchConnection() {
 async function loadAll() {
   if (!navigator.onLine) return;
   try {
-    const [customers, products, sales, purchases, stock, adjustments] = await Promise.all([
+    const [customers, products, sales, purchases, stock, adjustments,
+           partnerMoney, consignment] = await Promise.all([
       sb.from("customers").select("*").order("name"),
       sb.from("products").select("*").order("name"),
       sb.from("sales").select("*").order("date", { ascending: false }).order("created_at", { ascending: false }),
       sb.from("purchases").select("*").order("date", { ascending: false }).order("created_at", { ascending: false }),
       sb.from("stock_orders").select("*").order("date_ordered", { ascending: false }).order("created_at", { ascending: false }),
-      sb.from("adjustments").select("*").order("date", { ascending: false }).order("created_at", { ascending: false })
+      sb.from("adjustments").select("*").order("date", { ascending: false }).order("created_at", { ascending: false }),
+      sb.from("partner_money").select("*").order("date", { ascending: false }).order("created_at", { ascending: false }),
+      sb.from("consignment").select("*").order("date_out", { ascending: false }).order("created_at", { ascending: false })
     ]);
 
-    const failed = [customers, products, sales, purchases, stock, adjustments].find((r) => r.error);
+    const failed = [customers, products, sales, purchases, stock, adjustments,
+                    partnerMoney, consignment].find((r) => r.error);
     if (failed) throw failed.error;
 
     db.customers   = customers.data   || [];
@@ -274,6 +288,8 @@ async function loadAll() {
     db.purchases   = purchases.data   || [];
     db.stock       = stock.data       || [];
     db.adjustments = adjustments.data || [];
+    db.partnerMoney = partnerMoney.data || [];
+    db.consignment = consignment.data || [];
     state.loaded = true;
     render();
   } catch (err) {
@@ -333,7 +349,8 @@ async function remove(table, id) {
 /* ---------- navigation ---------- */
 
 const TITLES = { home: "Home", sales: "Sales", purchases: "Purchases",
-                 stock: "Stock orders", products: "Products & prices" };
+                 stock: "Stock", money: "Partner money",
+                 products: "Products & prices" };
 
 function go(screen) {
   state.screen = screen;
@@ -352,7 +369,8 @@ function render() {
   const screen = $("#screen");
   if (state.screen === "sales")     { screen.innerHTML = salesScreen();     wireList("sales");     return; }
   if (state.screen === "purchases") { screen.innerHTML = purchasesScreen(); wireList("purchases"); return; }
-  if (state.screen === "stock")     { screen.innerHTML = stockScreen();     wireList("stock");     return; }
+  if (state.screen === "stock")     { screen.innerHTML = stockScreen();     wireStock();           return; }
+  if (state.screen === "money")     { screen.innerHTML = moneyScreen();     wireMoney();           return; }
   if (state.screen === "products")  { screen.innerHTML = productsScreen();  wireProducts();        return; }
   screen.innerHTML = homeScreen();
   wireHome();
@@ -382,6 +400,7 @@ function wireList(kind) {
       if (kind === "sales")     editSale(db.sales.find((s) => s.id === id));
       if (kind === "purchases") editPurchase(db.purchases.find((p) => p.id === id));
       if (kind === "stock")     editStock(db.stock.find((s) => s.id === id));
+      if (kind === "consignment") editConsignment(db.consignment.find((c) => c.id === id));
     });
   });
 }
@@ -443,8 +462,8 @@ function salesScreen() {
   return html;
 }
 
-function editSale(sale) {
-  const isNew = !sale;
+function editSale(sale, asNew) {
+  const isNew = !sale || asNew === true;
   const s = sale || {
     date: todayISO(), customer: "", product: "", units: "", unit_price: "", unit_cost: 0,
     status: "unpaid", amount_received: "", method: "cash", note: ""
@@ -489,7 +508,7 @@ function editSale(sale) {
 
     // the cost is copied in when the sale is captured, so changing a
     // product's cost price later does not rewrite old sales
-    const keepCost = !isNew && product === s.product;
+    const keepCost = product === s.product && Number(s.unit_cost || 0) > 0;
     const row = {
       date: $("#f-date").value || todayISO(),
       customer: customer,
@@ -513,7 +532,7 @@ function editSale(sale) {
     const units = toNum($("#f-units").value);
     const price = toNum($("#f-price").value);
     const name  = $("#f-product").value;
-    const keepCost = !isNew && name === s.product;
+    const keepCost = name === s.product && Number(s.unit_cost || 0) > 0;
     const cost  = keepCost ? Number(s.unit_cost || 0) : costOf(name);
     const total = units * price;
     const profit = (price - cost) * units;
@@ -581,10 +600,21 @@ function totals() {
   });
 
   // money actually paid out on purchases
+  // Only money that actually left the business's cash or bank counts here.
+  // A purchase a partner paid for out of her own pocket becomes money owed
+  // to her instead, and is left alone until she is paid back.
   db.purchases.forEach((p) => {
     if (p.status !== "paid") return;
-    const amount = Number(p.amount || 0);
-    if (p.method === "eft") bank -= amount; else cash -= amount;
+    const fromBusiness = Number(p.amount || 0) - shareOf(p, "p1") - shareOf(p, "p2");
+    if (fromBusiness <= 0) return;
+    if (p.method === "eft") bank -= fromBusiness; else cash -= fromBusiness;
+  });
+
+  // paying a partner back does leave the business
+  db.partnerMoney.forEach((m) => {
+    if (m.kind !== "repaid") return;
+    const amount = Number(m.amount || 0);
+    if (m.method === "eft") bank -= amount; else cash -= amount;
   });
 
   // manual corrections and movements
@@ -652,6 +682,14 @@ function homeScreen() {
       '<div class="tile-value">' + money(t.profitMonth) + "</div>" +
       '<div class="tile-foot">' + tidyUnits(t.unitsMonth) + " units sold · " +
         money(t.salesMonth) + " taken in · " + money(t.costMonth) + " they cost you</div>" +
+    "</div>" +
+    '<div class="tiles" style="margin-top:12px">' +
+      PARTNER_KEYS.map((key) => {
+        const owed = partnerOwed(key).owed;
+        return '<div class="tile' + (owed > 0 ? " tile-warn" : "") + '">' +
+          '<div class="tile-label">Owed to ' + escapeHTML(partnerName(key)) + "</div>" +
+          '<div class="tile-value">' + money(owed) + "</div></div>";
+      }).join("") +
     "</div>" +
     '<button class="btn btn-block btn-primary" id="h-products" style="margin-top:16px">Products &amp; prices</button>' +
     '<button class="btn btn-block" id="h-adjust" style="margin-top:10px">Adjust cash or bank</button>' +
@@ -736,6 +774,236 @@ function wireHome() {
       if (kind === "adjustment") editAdjustment(db.adjustments.find((r) => r.id === id));
     });
   });
+}
+
+
+/* ---------- the two partners ---------- */
+
+const PARTNER_KEYS = ["p1", "p2"];
+
+function partnerName(key) {
+  return (CONFIG.PARTNERS && CONFIG.PARTNERS[key]) || (key === "p1" ? "Partner 1" : "Partner 2");
+}
+
+/** What a purchase or a consignment batch took out of each partner's pocket. */
+function shareOf(row, key) {
+  return Number((key === "p1" ? row.share1 : row.share2) || 0);
+}
+
+/**
+ * Money still owed back to one partner:
+ *   what she paid for out of her own pocket, plus anything she put in,
+ *   less whatever she has been paid back.
+ * Stock on consignment is deliberately NOT counted here — the ingredients
+ * for it were already captured as a purchase, and counting both would
+ * make the business look twice as far in her debt as it is.
+ */
+function partnerOwed(key) {
+  const fromPurchases = db.purchases.reduce((sum, p) => sum + shareOf(p, key), 0);
+  const putIn = db.partnerMoney.reduce((sum, m) =>
+    sum + (m.partner === key && m.kind === "in" ? Number(m.amount || 0) : 0), 0);
+  const paidBack = db.partnerMoney.reduce((sum, m) =>
+    sum + (m.partner === key && m.kind === "repaid" ? Number(m.amount || 0) : 0), 0);
+  return { fromPurchases: fromPurchases, putIn: putIn, paidBack: paidBack,
+           owed: fromPurchases + putIn - paidBack };
+}
+
+/** Value of consignment stock still on shelves, and whose money is in it. */
+function shelfValue(key) {
+  return db.consignment.reduce((sum, c) => {
+    const out = Number(c.units_out || 0);
+    if (out <= 0) return sum;
+    const left = Math.max(0, out - Number(c.units_sold || 0) - Number(c.units_returned || 0));
+    const share = key ? shareOf(c, key) : out * Number(c.unit_cost || 0);
+    return sum + share * (left / out);       // the part of that batch still unsold
+  }, 0);
+}
+
+/** Turns the "who paid" answer into the two share amounts. */
+function fundingShares(paidBy, total, firstShare) {
+  if (paidBy === "p1") return { share1: total, share2: 0 };
+  if (paidBy === "p2") return { share1: 0, share2: total };
+  if (paidBy === "split") {
+    const first = Math.min(Math.max(firstShare, 0), total);
+    return { share1: first, share2: total - first };
+  }
+  return { share1: 0, share2: 0 };           // the business paid
+}
+
+function fundingLabel(row) {
+  if (row.paid_by === "p1") return partnerName("p1") + " paid";
+  if (row.paid_by === "p2") return partnerName("p2") + " paid";
+  if (row.paid_by === "split")
+    return partnerName("p1") + " " + money(row.share1) + " · " + partnerName("p2") + " " + money(row.share2);
+  return "Business paid";
+}
+
+/** The "Who paid for this?" block, shared by purchases and consignment. */
+function fundingField(row, total) {
+  return field("Who paid for this?", choice("f-paidby", [
+      ["business", "Business"], ["p1", partnerName("p1")],
+      ["p2", partnerName("p2")], ["split", "Split"]
+    ], row.paid_by || "business")) +
+    '<div id="wrap-split">' +
+      field(partnerName("p1") + " put in", amountInput("f-share1", row.share1)) +
+      '<p id="f-split-note" class="field-hint" style="text-align:center"></p>' +
+    "</div>";
+}
+
+function wireFunding(getTotal) {
+  const refresh = () => {
+    const split = choiceValue("f-paidby") === "split";
+    $("#wrap-split").hidden = !split;
+    if (!split) { $("#f-split-note").innerHTML = ""; return; }
+    const total = getTotal();
+    const first = Math.min(Math.max(toNum($("#f-share1").value), 0), total);
+    $("#f-split-note").innerHTML =
+      partnerName("p2") + " puts in <strong>" + money(total - first) + "</strong>";
+  };
+  onChoice("f-paidby", refresh);
+  $("#f-share1").addEventListener("input", refresh);
+  refresh();
+  return refresh;
+}
+
+
+/* ---------- partner money screen ---------- */
+
+function moneyScreen() {
+  if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+
+  let html = "";
+  PARTNER_KEYS.forEach((key) => {
+    const t = partnerOwed(key);
+    html +=
+      '<div class="tile tile-wide' + (t.owed > 0 ? " tile-warn" : "") + '" style="margin-bottom:12px">' +
+        '<div class="tile-label">Owed to ' + escapeHTML(partnerName(key)) + "</div>" +
+        '<div class="tile-value">' + money(t.owed) + "</div>" +
+        '<div class="tile-foot">' +
+          money(t.fromPurchases) + " on purchases · " + money(t.putIn) + " put in · " +
+          money(t.paidBack) + " paid back</div>" +
+        '<div class="tile-foot">' + money(shelfValue(key)) + " of her money sitting in stock on shelves</div>" +
+      "</div>";
+  });
+
+  const entries = partnerEntries();
+  html += '<div class="section-head"><span>Every partner entry</span></div>';
+  if (!entries.length) {
+    html += emptyBox("Nothing yet. Tap + when one of you puts in money or gets paid back.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  entries.forEach((e) => {
+    html +=
+      '<button class="row" data-money="' + e.kind + ":" + e.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(e.title) + "</div>" +
+          '<div class="row-sub">' + escapeHTML(e.sub) + "</div>" +
+        "</div>" +
+        '<div class="row-side"><div class="row-amt ' + e.tone + '">' + e.amountText + "</div></div>" +
+      "</button>";
+  });
+  html += "</div>";
+  html += '<p class="field-hint" style="text-align:center">Green means the business owes her more. ' +
+          "Grey means she has been paid back.</p>";
+  return html;
+}
+
+/** Purchases a partner paid for, plus her own money in and payments back. */
+function partnerEntries() {
+  const list = [];
+
+  db.purchases.forEach((p) => {
+    if (p.paid_by === "business" || !p.paid_by) return;
+    PARTNER_KEYS.forEach((key) => {
+      const share = shareOf(p, key);
+      if (share <= 0) return;
+      list.push({
+        kind: "purchase", id: p.id, when: p.created_at || p.date,
+        title: partnerName(key) + " paid for " + p.item,
+        sub: "Purchase · " + shortDate(p.date) + (p.supplier ? " · " + p.supplier : ""),
+        amountText: "+" + money(share), tone: "amt-good"
+      });
+    });
+  });
+
+  db.partnerMoney.forEach((m) => {
+    const isIn = m.kind === "in";
+    list.push({
+      kind: "money", id: m.id, when: m.created_at || m.date,
+      title: partnerName(m.partner) + (isIn ? " put money in" : " was paid back"),
+      sub: shortDate(m.date) + " · " + (m.method === "eft" ? "EFT" : "Cash") +
+           (m.note ? " · " + m.note : ""),
+      amountText: (isIn ? "+" : "−") + money(m.amount),
+      tone: isIn ? "amt-good" : ""
+    });
+  });
+
+  list.sort((a, b) => String(b.when).localeCompare(String(a.when)));
+  return list;
+}
+
+function wireMoney() {
+  $$("[data-money]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const [kind, id] = row.dataset.money.split(":");
+      if (kind === "purchase") editPurchase(db.purchases.find((p) => p.id === id));
+      else editPartnerMoney(db.partnerMoney.find((m) => m.id === id));
+    });
+  });
+}
+
+function editPartnerMoney(entry) {
+  const isNew = !entry;
+  const m = entry || { date: todayISO(), partner: "p1", kind: "in", amount: "", method: "cash", note: "" };
+
+  const body =
+    field("Date", '<input id="f-date" type="date" value="' + escapeHTML(m.date) + '">') +
+    field("Who", choice("f-partner", [
+      ["p1", partnerName("p1")], ["p2", partnerName("p2")]
+    ], m.partner)) +
+    field("What happened", choice("f-kind", [
+      ["in", "Put money in"], ["repaid", "Was paid back"]
+    ], m.kind)) +
+    field("Amount", amountInput("f-amount", m.amount)) +
+    field("Cash or EFT", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], m.method)) +
+    field("Note (optional)", '<textarea id="f-note" placeholder="What the money was for">' +
+                             escapeHTML(m.note || "") + "</textarea>") +
+    '<p id="f-effect" class="field-hint" style="text-align:center;font-size:15px"></p>' +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "Partner money" : "Edit entry", body, async () => {
+    const amount = toNum($("#f-amount").value);
+    if (amount <= 0) { toast("Enter an amount."); return false; }
+    const row = {
+      date: $("#f-date").value || todayISO(),
+      partner: choiceValue("f-partner"),
+      kind: choiceValue("f-kind"),
+      amount: amount,
+      method: choiceValue("f-method"),
+      note: $("#f-note").value.trim() || null
+    };
+    const ok = await save("partner_money", row, isNew ? null : m.id);
+    if (ok) toast("Saved.");
+    return ok;
+  });
+
+  const showEffect = () => {
+    const key = choiceValue("f-partner");
+    const kind = choiceValue("f-kind");
+    const amount = toNum($("#f-amount").value);
+    const now = partnerOwed(key).owed - (isNew ? 0 : (m.kind === "in" ? 1 : -1) * Number(m.amount || 0));
+    const after = now + (kind === "in" ? amount : -amount);
+    $("#f-effect").innerHTML = "After saving, the business owes " + escapeHTML(partnerName(key)) +
+                               " <strong>" + money(after) + "</strong>";
+  };
+  onChoice("f-partner", showEffect);
+  onChoice("f-kind", showEffect);
+  $("#f-amount").addEventListener("input", showEffect);
+  showEffect();
+
+  if (!isNew) wireDelete("this entry", () => remove("partner_money", m.id));
 }
 
 
@@ -905,7 +1173,8 @@ function purchasesScreen() {
           '<div class="row-title">' + escapeHTML(p.item) + "</div>" +
           '<div class="row-sub">' +
             (p.supplier ? escapeHTML(p.supplier) + " · " : "") + shortDate(p.date) +
-            " · " + (p.method === "eft" ? "EFT" : "Cash") + "</div>" +
+            " · " + (p.method === "eft" ? "EFT" : "Cash") +
+            (p.paid_by && p.paid_by !== "business" ? " · " + escapeHTML(fundingLabel(p)) : "") + "</div>" +
         "</div>" +
         '<div class="row-side">' +
           '<div class="row-amt">' + money(p.amount) + "</div>" +
@@ -927,7 +1196,7 @@ function editPurchase(purchase) {
   const isNew = !purchase;
   const p = purchase || {
     date: todayISO(), item: "", supplier: "", amount: "",
-    status: "paid", method: "cash", note: ""
+    status: "paid", method: "cash", paid_by: "business", share1: "", share2: "", note: ""
   };
 
   const suppliers = uniqueValues(db.purchases, "supplier");
@@ -940,6 +1209,7 @@ function editPurchase(purchase) {
     field("Amount", amountInput("f-amount", p.amount)) +
     field("Payment", choice("f-status", [["paid", "Paid"], ["unpaid", "Not paid"]], p.status)) +
     field("Method", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], p.method)) +
+    fundingField(p) +
     field("Note (optional)", '<textarea id="f-note">' + escapeHTML(p.note || "") + "</textarea>") +
     (isNew ? "" : deleteButton());
 
@@ -949,6 +1219,8 @@ function editPurchase(purchase) {
     if (!item) { toast("Enter what you bought."); return false; }
     if (amount <= 0) { toast("Enter an amount."); return false; }
 
+    const paidBy = choiceValue("f-paidby");
+    const shares = fundingShares(paidBy, amount, toNum($("#f-share1").value));
     const row = {
       date: $("#f-date").value || todayISO(),
       item: item,
@@ -956,12 +1228,18 @@ function editPurchase(purchase) {
       amount: amount,
       status: choiceValue("f-status"),
       method: choiceValue("f-method"),
+      paid_by: paidBy,
+      share1: shares.share1,
+      share2: shares.share2,
       note: $("#f-note").value.trim() || null
     };
     const ok = await save("purchases", row, isNew ? null : p.id);
     if (ok) toast(isNew ? "Purchase saved." : "Purchase updated.");
     return ok;
   });
+
+  const refreshSplit = wireFunding(() => toNum($("#f-amount").value));
+  $("#f-amount").addEventListener("input", refreshSplit);
 
   if (!isNew) wireDelete("this purchase", () => remove("purchases", p.id));
 }
@@ -971,6 +1249,22 @@ function editPurchase(purchase) {
 
 function stockScreen() {
   if (!state.loaded) return '<div class="card"><div class="empty">Loading…</div></div>';
+  const tabs =
+    '<div class="segment" data-stocktab style="margin-bottom:12px">' +
+      '<button data-tab="consignment" aria-pressed="' + (state.stockTab === "consignment") + '">On shelves</button>' +
+      '<button data-tab="orders" aria-pressed="' + (state.stockTab === "orders") + '">Orders</button>' +
+    "</div>";
+  return tabs + (state.stockTab === "orders" ? ordersScreen() : consignmentScreen());
+}
+
+function wireStock() {
+  $$("[data-stocktab] button").forEach((b) => {
+    b.addEventListener("click", () => { state.stockTab = b.dataset.tab; render(); });
+  });
+  wireList(state.stockTab === "orders" ? "stock" : "consignment");
+}
+
+function ordersScreen() {
 
   const range = filterRange(state.filter.stock);
   const rows = db.stock.filter((o) => inRange(o.date_ordered, range));
@@ -1090,6 +1384,186 @@ function editStock(order) {
 
   wirePickers();
   if (!isNew) wireDelete("this stock order", () => remove("stock_orders", o.id));
+}
+
+
+/* ---------- stock out on consignment ---------- */
+
+function unitsOnShelf(row) {
+  return Math.max(0, Number(row.units_out || 0) -
+                     Number(row.units_sold || 0) - Number(row.units_returned || 0));
+}
+
+function consignmentScreen() {
+  const range = filterRange(state.filter.consignment);
+  const rows = db.consignment.filter((c) => inRange(c.date_out, range));
+  const openRows = rows.filter((c) => !c.settled);
+  const unitsOut = openRows.reduce((sum, c) => sum + unitsOnShelf(c), 0);
+
+  let html = filterBar("consignment");
+  html += '<div class="section-head"><span>' + tidyUnits(unitsOut) + " units on shelves</span><span>" +
+          money(shelfValue(null)) + " tied up</span></div>";
+
+  if (!rows.length) {
+    html += emptyBox("Nothing out on consignment. Tap + when you leave stock at a shop.");
+    return html;
+  }
+
+  html += '<div class="card">';
+  rows.forEach((c) => {
+    const left = unitsOnShelf(c);
+    const done = c.settled || left <= 0;
+    html +=
+      '<button class="row" data-open="' + c.id + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHTML(c.customer) + "</div>" +
+          '<div class="row-sub">' + escapeHTML(c.product) + " · out " + shortDate(c.date_out) +
+            " · " + escapeHTML(fundingLabel(c)) + "</div>" +
+        "</div>" +
+        '<div class="row-side">' +
+          '<div class="row-amt">' + tidyUnits(left) + " left</div>" +
+          '<span class="pill ' + (done ? "pill-good" : "pill-warn") + '">' +
+            (c.settled ? "Settled" : tidyUnits(c.units_sold) + " sold") + "</span>" +
+        "</div>" +
+      "</button>";
+  });
+  html += "</div>";
+
+  const owedByShops = rows.filter((c) => !c.settled)
+    .reduce((sum, c) => sum + Number(c.units_sold || 0) * Number(c.unit_price || 0), 0);
+  if (owedByShops > 0) {
+    html += '<p class="field-hint" style="text-align:center">Sold but not settled by the shops: <strong>' +
+            money(owedByShops) + "</strong></p>";
+  }
+  return html;
+}
+
+function editConsignment(entry) {
+  const isNew = !entry;
+  const c = entry || {
+    date_out: todayISO(), customer: "", product: "", units_out: "",
+    unit_cost: "", unit_price: "", paid_by: "business", share1: "", share2: "",
+    units_sold: "", units_returned: "", settled: false, note: ""
+  };
+
+  const body =
+    field("Date left at the shop", '<input id="f-date" type="date" value="' +
+          escapeHTML(c.date_out || "") + '">') +
+    pickerField("Shop", "f-customer", db.customers.map((x) => x.name), c.customer, "customer") +
+    pickerField("Product", "f-product", db.products.map((x) => x.name), c.product, "product") +
+    '<div class="two">' +
+      field("Units left there", numberInput("f-units", c.units_out, "0")) +
+      field("Cost of one", amountInput("f-cost", c.unit_cost)) +
+    "</div>" +
+    field("Price the shop pays for one", amountInput("f-price", c.unit_price)) +
+    fundingField(c) +
+    '<div class="two">' +
+      field("Units sold so far", numberInput("f-sold", c.units_sold, "0")) +
+      field("Units taken back", numberInput("f-returned", c.units_returned, "0")) +
+    "</div>" +
+    '<div class="totals-box" id="f-totals"></div>' +
+    field("Has the shop paid up?", choice("f-settled", [
+      ["no", "Not yet"], ["yes", "Settled"]
+    ], c.settled ? "yes" : "no")) +
+    field("Note (optional)", '<textarea id="f-note">' + escapeHTML(c.note || "") + "</textarea>") +
+    (isNew ? "" : '<button type="button" class="btn btn-block" id="f-tosale" style="margin-top:8px">' +
+                  "Capture the sale for the units sold</button>") +
+    (isNew ? "" : deleteButton());
+
+  openSheet(isNew ? "Stock out on consignment" : "Edit consignment", body, async () => {
+    const customer = $("#f-customer").value;
+    const product  = $("#f-product").value;
+    const out      = toNum($("#f-units").value);
+    const sold     = toNum($("#f-sold").value);
+    const returned = toNum($("#f-returned").value);
+
+    if (!customer) { toast("Choose the shop."); return false; }
+    if (!product)  { toast("Choose a product."); return false; }
+    if (out <= 0)  { toast("Enter how many units you left there."); return false; }
+    if (sold + returned > out) {
+      toast("Sold plus taken back is more than you left there."); return false;
+    }
+
+    const cost = toNum($("#f-cost").value);
+    const paidBy = choiceValue("f-paidby");
+    const shares = fundingShares(paidBy, out * cost, toNum($("#f-share1").value));
+
+    const row = {
+      date_out: $("#f-date").value || todayISO(),
+      customer: customer,
+      product: product,
+      units_out: out,
+      unit_cost: cost,
+      unit_price: toNum($("#f-price").value),
+      paid_by: paidBy,
+      share1: shares.share1,
+      share2: shares.share2,
+      units_sold: sold,
+      units_returned: returned,
+      settled: choiceValue("f-settled") === "yes",
+      note: $("#f-note").value.trim() || null
+    };
+    const ok = await save("consignment", row, isNew ? null : c.id);
+    if (ok) toast(isNew ? "Consignment saved." : "Consignment updated.");
+    return ok;
+  });
+
+  const showTotals = () => {
+    const out = toNum($("#f-units").value);
+    const sold = toNum($("#f-sold").value);
+    const returned = toNum($("#f-returned").value);
+    const cost = toNum($("#f-cost").value);
+    const price = toNum($("#f-price").value);
+    const left = Math.max(0, out - sold - returned);
+    $("#f-totals").innerHTML =
+      '<div class="totals-row"><span>Still on the shelf</span><strong>' +
+        tidyUnits(left) + " units</strong></div>" +
+      '<div class="totals-row"><span>Your money sitting there</span><span>' +
+        money(left * cost) + "</span></div>" +
+      '<div class="totals-row totals-profit"><span>Sold, owed by the shop</span><strong>' +
+        money(sold * price) + "</strong></div>";
+  };
+
+  // picking a product brings its cost and selling price in
+  $("#f-product").addEventListener("change", () => {
+    const product = findProduct($("#f-product").value);
+    if (product) {
+      if (!toNum($("#f-cost").value) && Number(product.cost_price || 0) > 0) {
+        $("#f-cost").value = Number(product.cost_price).toFixed(2);
+      }
+      if (!toNum($("#f-price").value) && Number(product.sell_price || 0) > 0) {
+        $("#f-price").value = Number(product.sell_price).toFixed(2);
+      }
+    }
+    refreshAll();
+  });
+
+  const refreshSplit = wireFunding(() => toNum($("#f-units").value) * toNum($("#f-cost").value));
+  const refreshAll = () => { showTotals(); refreshSplit(); };
+  ["f-units", "f-cost", "f-price", "f-sold", "f-returned"].forEach((id) => {
+    $("#" + id).addEventListener("input", refreshAll);
+  });
+  refreshAll();
+
+  // hand the sold units straight to the sales form, so nothing is typed twice
+  const toSale = $("#f-tosale");
+  if (toSale) {
+    toSale.addEventListener("click", () => {
+      const sold = toNum($("#f-sold").value);
+      if (sold <= 0) { toast("No units sold to capture yet."); return; }
+      const prefill = {
+        date: todayISO(), customer: $("#f-customer").value, product: $("#f-product").value,
+        units: sold, unit_price: toNum($("#f-price").value), unit_cost: toNum($("#f-cost").value),
+        status: "unpaid", amount_received: "", method: "cash",
+        note: "From consignment at " + $("#f-customer").value
+      };
+      closeSheet();
+      setTimeout(() => editSale(prefill, true), 120);
+    });
+  }
+
+  wirePickers();
+  if (!isNew) wireDelete("this consignment", () => remove("consignment", c.id));
 }
 
 
@@ -1417,7 +1891,9 @@ function exportData(period) {
     sales:       db.sales.filter((r) => inRange(r.date, range)),
     purchases:   db.purchases.filter((r) => inRange(r.date, range)),
     stock:       db.stock.filter((r) => inRange(r.date_ordered, range)),
-    adjustments: db.adjustments.filter((r) => inRange(r.date, range))
+    adjustments: db.adjustments.filter((r) => inRange(r.date, range)),
+    partnerMoney: db.partnerMoney.filter((r) => inRange(r.date, range)),
+    consignment: db.consignment.filter((r) => inRange(r.date_out, range))
   };
 }
 
@@ -1448,11 +1924,13 @@ function exportSpreadsheets(period) {
 
   if (data.purchases.length) {
     later(() => csvFile("nanies-purchases-" + tag + "-" + stamp + ".csv",
-      ["Date", "Item", "Supplier", "Amount", "Status", "Method", "Note"],
+      ["Date", "Item", "Supplier", "Amount", "Status", "Method", "Who paid",
+       partnerName("p1") + " share", partnerName("p2") + " share", "Note"],
       data.purchases.map((p) => [
         p.date, p.item, p.supplier || "", Number(p.amount || 0).toFixed(2),
         p.status === "paid" ? "Paid" : "Not paid",
-        p.method === "eft" ? "EFT" : "Cash", p.note || ""
+        p.method === "eft" ? "EFT" : "Cash", fundingLabel(p),
+        Number(p.share1 || 0).toFixed(2), Number(p.share2 || 0).toFixed(2), p.note || ""
       ])), files++ * 350);
   }
 
@@ -1478,6 +1956,30 @@ function exportSpreadsheets(period) {
         return [a.date, rule.label, amount.toFixed(2),
                 (rule.cash * amount).toFixed(2), (rule.bank * amount).toFixed(2), a.note || ""];
       })), files++ * 350);
+  }
+
+  if (data.consignment.length) {
+    later(() => csvFile("nanies-consignment-" + tag + "-" + stamp + ".csv",
+      ["Date out", "Shop", "Product", "Units out", "Cost each", "Price each",
+       "Who paid", partnerName("p1") + " share", partnerName("p2") + " share",
+       "Units sold", "Units taken back", "Still on shelf", "Settled", "Note"],
+      data.consignment.map((c) => [
+        c.date_out, c.customer, c.product, tidyUnits(c.units_out),
+        Number(c.unit_cost || 0).toFixed(2), Number(c.unit_price || 0).toFixed(2),
+        fundingLabel(c), Number(c.share1 || 0).toFixed(2), Number(c.share2 || 0).toFixed(2),
+        tidyUnits(c.units_sold), tidyUnits(c.units_returned), tidyUnits(unitsOnShelf(c)),
+        c.settled ? "Yes" : "No", c.note || ""
+      ])), files++ * 350);
+  }
+
+  if (data.partnerMoney.length) {
+    later(() => csvFile("nanies-partner-money-" + tag + "-" + stamp + ".csv",
+      ["Date", "Partner", "What happened", "Amount", "Method", "Note"],
+      data.partnerMoney.map((m) => [
+        m.date, partnerName(m.partner),
+        m.kind === "in" ? "Put money in" : "Was paid back",
+        Number(m.amount || 0).toFixed(2), m.method === "eft" ? "EFT" : "Cash", m.note || ""
+      ])), files++ * 350);
   }
 
   if (!files) { toast("Nothing to export for " + EXPORT_LABELS[period] + "."); return; }
@@ -1524,6 +2026,10 @@ function exportStatement(period) {
       "<tr><td>In the bank</td><td class=\"num\">" + money(t.bank) + "</td></tr>" +
       "<tr><td>Owed to us by customers</td><td class=\"num\">" + money(t.owedToUs) + "</td></tr>" +
       "<tr><td>Owed by us to suppliers</td><td class=\"num\">" + money(t.weOwe) + "</td></tr>" +
+      PARTNER_KEYS.map((key) =>
+        "<tr><td>Owed to " + escapeHTML(partnerName(key)) + "</td><td class=\"num\">" +
+        money(partnerOwed(key).owed) + "</td></tr>").join("") +
+      "<tr><td>Stock sitting on shelves</td><td class=\"num\">" + money(shelfValue(null)) + "</td></tr>" +
       "<tr><td>Units sold in this period</td><td class=\"num\">" + tidyUnits(unitsTotal) + "</td></tr>" +
       "<tr><td>Sales in this period</td><td class=\"num\">" + money(salesTotal) + "</td></tr>" +
       "<tr><td>What those sales cost to make</td><td class=\"num\">" +
@@ -1549,11 +2055,22 @@ function exportStatement(period) {
     data.stock.map((o) => [niceDate(o.date_ordered), o.product, o.customer,
       tidyUnits(o.qty_ordered), tidyUnits(o.qty_delivered), tidyUnits(outstandingUnits(o))]));
 
+  html += table("Stock on consignment",
+    ["Out", "Shop", "Product", "Units out", "Sold", "On shelf", "Whose money"],
+    data.consignment.map((c) => [niceDate(c.date_out), c.customer, c.product,
+      tidyUnits(c.units_out), tidyUnits(c.units_sold), tidyUnits(unitsOnShelf(c)),
+      fundingLabel(c)]));
+
+  html += table("Partner money", ["Date", "Partner", "What happened", "Amount", "Note"],
+    data.partnerMoney.map((m) => [niceDate(m.date), partnerName(m.partner),
+      m.kind === "in" ? "Put money in" : "Was paid back", money(m.amount), m.note || ""]));
+
   html += table("Cash and bank adjustments", ["Date", "What happened", "Amount", "Note"],
     data.adjustments.map((a) => [niceDate(a.date),
       (ADJUST_KINDS[a.kind] || {}).label || a.kind, money(a.amount), a.note || ""]));
 
-  if (!data.sales.length && !data.purchases.length && !data.stock.length && !data.adjustments.length) {
+  if (!data.sales.length && !data.purchases.length && !data.stock.length &&
+      !data.adjustments.length && !data.consignment.length && !data.partnerMoney.length) {
     html += "<p>No entries in this period.</p>";
   }
 
