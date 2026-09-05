@@ -177,12 +177,27 @@ create table if not exists consignment (
   units_sold     numeric(12,2) not null default 0,
   units_returned numeric(12,2) not null default 0,
   settled        boolean not null default false,     -- shop has paid up
+  settled_on     date,                               -- when they paid
+  settle_method  text not null default 'cash'        -- how they paid
+                 check (settle_method in ('cash','eft')),
+  sale_id        uuid references sales(id) on delete set null,  -- the sale it created
   note           text,
   on_shelf       numeric(12,2)
                  generated always as (units_out - units_sold - units_returned) stored,
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
+
+-- Added by a later version of this file. Settling a consignment now
+-- writes a real sale, and this remembers which one so the two stay
+-- in step instead of being captured twice.
+alter table consignment add column if not exists settled_on    date;
+alter table consignment add column if not exists settle_method text not null default 'cash';
+alter table consignment add column if not exists sale_id       uuid references sales(id) on delete set null;
+do $$ begin
+  alter table consignment add constraint consignment_settle_method_check
+    check (settle_method in ('cash','eft'));
+exception when duplicate_object then null; end $$;
 
 -- ---------- Keep updated_at honest ----------
 

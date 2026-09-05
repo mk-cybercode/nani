@@ -331,6 +331,23 @@ async function save(table, row, id) {
   }
 }
 
+/** Same as save(), but returns the written row (we need its id). */
+async function saveReturning(table, row, id) {
+  if (!navigator.onLine) { toast("No internet — not saved."); return null; }
+  try {
+    const q = id
+      ? sb.from(table).update(row).eq("id", id).select().single()
+      : sb.from(table).insert(row).select().single();
+    const { data, error } = await q;
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.error(err);
+    toast("Not saved. " + friendlyError(err));
+    return null;
+  }
+}
+
 async function remove(table, id) {
   if (!navigator.onLine) { toast("No internet — not deleted."); return false; }
   try {
@@ -961,8 +978,12 @@ function editPartnerMoney(entry) {
   const body =
     field("Date", '<input id="f-date" type="date" value="' + escapeHTML(m.date) + '">') +
     field("Who", choice("f-partner", [
-      ["p1", partnerName("p1")], ["p2", partnerName("p2")]
+      ["p1", partnerName("p1")], ["p2", partnerName("p2")], ["both", "Split"]
     ], m.partner)) +
+    '<div id="wrap-split">' +
+      field(partnerName("p1") + "'s share", amountInput("f-share1", "")) +
+      '<p id="f-split-note" class="field-hint" style="text-align:center"></p>' +
+    "</div>" +
     field("What happened", choice("f-kind", [
       ["in", "Put money in"], ["repaid", "Was paid back"]
     ], m.kind)) +
@@ -976,31 +997,66 @@ function editPartnerMoney(entry) {
   openSheet(isNew ? "Partner money" : "Edit entry", body, async () => {
     const amount = toNum($("#f-amount").value);
     if (amount <= 0) { toast("Enter an amount."); return false; }
-    const row = {
+
+    const base = {
       date: $("#f-date").value || todayISO(),
-      partner: choiceValue("f-partner"),
       kind: choiceValue("f-kind"),
-      amount: amount,
       method: choiceValue("f-method"),
       note: $("#f-note").value.trim() || null
     };
-    const ok = await save("partner_money", row, isNew ? null : m.id);
+    const who = choiceValue("f-partner");
+
+    // A split is kept as one line each, so either of you can correct
+    // your own half later without touching the other's.
+    if (who === "both") {
+      const shares = fundingShares("split", amount, toNum($("#f-share1").value));
+      if (shares.share1 <= 0 || shares.share2 <= 0) {
+        toast("Both shares must be more than nothing."); return false;
+      }
+      const first = await save("partner_money",
+        Object.assign({ partner: "p1", amount: shares.share1 }, base), isNew ? null : m.id);
+      if (!first) return false;
+      const second = await save("partner_money",
+        Object.assign({ partner: "p2", amount: shares.share2 }, base), null);
+      if (second) toast("Saved as one line each.");
+      return second;
+    }
+
+    const ok = await save("partner_money",
+      Object.assign({ partner: who, amount: amount }, base), isNew ? null : m.id);
     if (ok) toast("Saved.");
     return ok;
   });
 
   const showEffect = () => {
-    const key = choiceValue("f-partner");
+    const who = choiceValue("f-partner");
     const kind = choiceValue("f-kind");
     const amount = toNum($("#f-amount").value);
-    const now = partnerOwed(key).owed - (isNew ? 0 : (m.kind === "in" ? 1 : -1) * Number(m.amount || 0));
-    const after = now + (kind === "in" ? amount : -amount);
-    $("#f-effect").innerHTML = "After saving, the business owes " + escapeHTML(partnerName(key)) +
-                               " <strong>" + money(after) + "</strong>";
+    const split = who === "both";
+
+    $("#wrap-split").hidden = !split;
+
+    const already = (key) =>
+      isNew || m.partner !== key ? 0 : (m.kind === "in" ? 1 : -1) * Number(m.amount || 0);
+    const line = (key, share) => {
+      const after = partnerOwed(key).owed - already(key) + (kind === "in" ? share : -share);
+      return "owes " + escapeHTML(partnerName(key)) + " <strong>" + money(after) + "</strong>";
+    };
+
+    if (split) {
+      const shares = fundingShares("split", amount, toNum($("#f-share1").value));
+      $("#f-split-note").innerHTML =
+        escapeHTML(partnerName("p2")) + "'s share is <strong>" + money(shares.share2) + "</strong>";
+      $("#f-effect").innerHTML = "After saving, the business " +
+        line("p1", shares.share1) + " and " + line("p2", shares.share2);
+    } else {
+      $("#f-effect").innerHTML = "After saving, the business " + line(who, amount);
+    }
   };
   onChoice("f-partner", showEffect);
   onChoice("f-kind", showEffect);
   $("#f-amount").addEventListener("input", showEffect);
+  $("#f-share1").addEventListener("input", showEffect);
   showEffect();
 
   if (!isNew) wireDelete("this entry", () => remove("partner_money", m.id));
@@ -1423,7 +1479,9 @@ function consignmentScreen() {
         '<div class="row-side">' +
           '<div class="row-amt">' + tidyUnits(left) + " left</div>" +
           '<span class="pill ' + (done ? "pill-good" : "pill-warn") + '">' +
-            (c.settled ? "Settled" : tidyUnits(c.units_sold) + " sold") + "</span>" +
+            (c.settled
+              ? "Paid " + (c.settle_method === "eft" ? "EFT" : "cash")
+              : tidyUnits(c.units_sold) + " sold") + "</span>" +
         "</div>" +
       "</button>";
   });
@@ -1443,7 +1501,8 @@ function editConsignment(entry) {
   const c = entry || {
     date_out: todayISO(), customer: "", product: "", units_out: "",
     unit_cost: "", unit_price: "", paid_by: "business", share1: "", share2: "",
-    units_sold: "", units_returned: "", settled: false, note: ""
+    units_sold: "", units_returned: "", settled: false,
+    settled_on: "", settle_method: "cash", sale_id: null, note: ""
   };
 
   const body =
@@ -1465,9 +1524,16 @@ function editConsignment(entry) {
     field("Has the shop paid up?", choice("f-settled", [
       ["no", "Not yet"], ["yes", "Settled"]
     ], c.settled ? "yes" : "no")) +
+    '<div id="wrap-settle">' +
+      '<div class="two">' +
+        field("Date they paid", '<input id="f-settled-on" type="date" value="' +
+              escapeHTML(c.settled_on || todayISO()) + '">') +
+        field("How they paid", choice("f-settle-method",
+              [["cash", "Cash"], ["eft", "EFT"]], c.settle_method || "cash")) +
+      "</div>" +
+      '<p id="f-settle-note" class="field-hint" style="text-align:center;font-size:15px"></p>' +
+    "</div>" +
     field("Note (optional)", '<textarea id="f-note">' + escapeHTML(c.note || "") + "</textarea>") +
-    (isNew ? "" : '<button type="button" class="btn btn-block" id="f-tosale" style="margin-top:8px">' +
-                  "Capture the sale for the units sold</button>") +
     (isNew ? "" : deleteButton());
 
   openSheet(isNew ? "Stock out on consignment" : "Edit consignment", body, async () => {
@@ -1488,23 +1554,70 @@ function editConsignment(entry) {
     const paidBy = choiceValue("f-paidby");
     const shares = fundingShares(paidBy, out * cost, toNum($("#f-share1").value));
 
+    const price    = toNum($("#f-price").value);
+    const settled  = choiceValue("f-settled") === "yes";
+    const method   = choiceValue("f-settle-method");
+    const settledOn = $("#f-settled-on").value || todayISO();
+
+    if (settled && sold <= 0) {
+      toast("Enter how many units the shop sold before settling."); return false;
+    }
+
     const row = {
       date_out: $("#f-date").value || todayISO(),
       customer: customer,
       product: product,
       units_out: out,
       unit_cost: cost,
-      unit_price: toNum($("#f-price").value),
+      unit_price: price,
       paid_by: paidBy,
       share1: shares.share1,
       share2: shares.share2,
       units_sold: sold,
       units_returned: returned,
-      settled: choiceValue("f-settled") === "yes",
+      settled: settled,
+      settled_on: settled ? settledOn : null,
+      settle_method: method,
+      sale_id: c.sale_id || null,
       note: $("#f-note").value.trim() || null
     };
+
+    // Settling means the shop has paid, so it becomes a real sale and the
+    // money lands in cash or the bank. The sale is kept in step with this
+    // batch rather than being captured a second time by hand.
+    let message = isNew ? "Consignment saved." : "Consignment updated.";
+
+    if (settled) {
+      const sale = {
+        date: settledOn,
+        customer: customer,
+        product: product,
+        units: sold,
+        unit_price: price,
+        unit_cost: cost,
+        amount: sold * price,
+        status: "paid",
+        amount_received: sold * price,
+        method: method,
+        note: "Consignment settled at " + customer
+      };
+      const existing = c.sale_id && db.sales.find((x) => x.id === c.sale_id);
+      const written = await saveReturning("sales", sale, existing ? c.sale_id : null);
+      if (!written) return false;
+      row.sale_id = written.id;
+      message = existing
+        ? "Updated, and the sale it made was updated too."
+        : "Settled — " + money(sold * price) + " added to " +
+          (method === "eft" ? "the bank" : "cash on hand") + " as a sale.";
+    } else if (c.sale_id) {
+      // taken back off settled: the sale it created goes with it
+      await remove("sales", c.sale_id);
+      row.sale_id = null;
+      message = "No longer settled — the sale it had made was removed.";
+    }
+
     const ok = await save("consignment", row, isNew ? null : c.id);
-    if (ok) toast(isNew ? "Consignment saved." : "Consignment updated.");
+    if (ok) toast(message);
     return ok;
   });
 
@@ -1538,32 +1651,34 @@ function editConsignment(entry) {
     refreshAll();
   });
 
+  const showSettle = () => {
+    const settled = choiceValue("f-settled") === "yes";
+    $("#wrap-settle").hidden = !settled;
+    if (!settled) return;
+    const takings = toNum($("#f-sold").value) * toNum($("#f-price").value);
+    const method = choiceValue("f-settle-method");
+    $("#f-settle-note").innerHTML = c.sale_id
+      ? "The sale this made will be updated to <strong>" + money(takings) + "</strong>"
+      : "Saving will add a sale of <strong>" + money(takings) + "</strong> to " +
+        (method === "eft" ? "<strong>the bank</strong>" : "<strong>cash on hand</strong>");
+  };
+  onChoice("f-settled", showSettle);
+  onChoice("f-settle-method", showSettle);
+
   const refreshSplit = wireFunding(() => toNum($("#f-units").value) * toNum($("#f-cost").value));
-  const refreshAll = () => { showTotals(); refreshSplit(); };
+  const refreshAll = () => { showTotals(); refreshSplit(); showSettle(); };
   ["f-units", "f-cost", "f-price", "f-sold", "f-returned"].forEach((id) => {
     $("#" + id).addEventListener("input", refreshAll);
   });
   refreshAll();
 
-  // hand the sold units straight to the sales form, so nothing is typed twice
-  const toSale = $("#f-tosale");
-  if (toSale) {
-    toSale.addEventListener("click", () => {
-      const sold = toNum($("#f-sold").value);
-      if (sold <= 0) { toast("No units sold to capture yet."); return; }
-      const prefill = {
-        date: todayISO(), customer: $("#f-customer").value, product: $("#f-product").value,
-        units: sold, unit_price: toNum($("#f-price").value), unit_cost: toNum($("#f-cost").value),
-        status: "unpaid", amount_received: "", method: "cash",
-        note: "From consignment at " + $("#f-customer").value
-      };
-      closeSheet();
-      setTimeout(() => editSale(prefill, true), 120);
+  wirePickers();
+  if (!isNew) {
+    wireDelete(c.sale_id ? "this consignment and the sale it made" : "this consignment", async () => {
+      if (c.sale_id) await remove("sales", c.sale_id);
+      return remove("consignment", c.id);
     });
   }
-
-  wirePickers();
-  if (!isNew) wireDelete("this consignment", () => remove("consignment", c.id));
 }
 
 

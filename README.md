@@ -55,6 +55,20 @@ It then opens full screen with its own icon, like an app.
 - **Stock** holds two lists behind a switch at the top: **On shelves** (stock
   left at a shop that only gets paid for once it sells) and **Orders** (what a
   customer ordered and what has been delivered).
+
+### Settling a consignment
+
+When a shop pays up, open that batch, set **Has the shop paid up?** to
+**Settled**, and say whether they paid **Cash** or **EFT**. Saving then writes
+a real sale for the units they sold — it appears in Sales, counts toward the
+month's profit, and lands in cash on hand or the bank.
+
+You never capture that sale by hand as well. The batch remembers which sale it
+made, so:
+
+- changing the units sold afterwards updates that same sale;
+- taking it back off Settled removes the sale again;
+- deleting the batch deletes the sale with it, and says so first.
 - **Sales** asks who you sold to, which product, how many units and the price
   for one. The price fills in from the product automatically and can be changed
   for that sale. The total and the profit appear as you type, before you save.
@@ -76,7 +90,9 @@ It then opens full screen with its own icon, like an app.
 
 When you capture a purchase, **Who paid for this?** decides where the money
 came from: the business, one partner, or both (Split, where you type what the
-first partner put in and the rest falls to the other). A purchase a partner
+first partner put in and the rest falls to the other). The Money tab takes a
+Split the same way; it is kept as one line each, so either of you can correct
+your own half later without touching the other's. A purchase a partner
 paid for does **not** come off the business's cash or bank — it becomes money
 owed to her instead, and only leaves the balance when she is paid back.
 
