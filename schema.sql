@@ -80,6 +80,20 @@ create table if not exists purchases (
              check (paid_by in ('business','p1','p2','split')),
   share1     numeric(12,2) not null default 0,       -- first partner's share
   share2     numeric(12,2) not null default 0,       -- second partner's share
+  -- Money the supplier gave back: goods returned, an overcharge corrected.
+  -- refund_to says whose account it actually landed in, which need not be
+  -- whoever paid for the purchase:
+  --   business  the business's own cash or bank (refund_method says which)
+  --   p1 / p2   straight into that partner's pocket
+  --   split     shared, refund_share1 + refund_share2
+  refund        numeric(12,2) not null default 0,
+  refund_date   date,
+  refund_method text not null default 'cash'
+                check (refund_method in ('cash','eft')),
+  refund_to     text not null default 'business'
+                check (refund_to in ('business','p1','p2','split')),
+  refund_share1 numeric(12,2) not null default 0,
+  refund_share2 numeric(12,2) not null default 0,
   note       text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -89,9 +103,32 @@ create table if not exists purchases (
 alter table purchases add column if not exists paid_by text not null default 'business';
 alter table purchases add column if not exists share1 numeric(12,2) not null default 0;
 alter table purchases add column if not exists share2 numeric(12,2) not null default 0;
+alter table purchases add column if not exists refund        numeric(12,2) not null default 0;
+alter table purchases add column if not exists refund_date   date;
+alter table purchases add column if not exists refund_method text not null default 'cash';
+alter table purchases add column if not exists refund_to     text not null default 'business';
+alter table purchases add column if not exists refund_share1 numeric(12,2) not null default 0;
+alter table purchases add column if not exists refund_share2 numeric(12,2) not null default 0;
+
+-- Any refund captured before there was a choice followed whoever paid for
+-- the purchase. Keep those as they were instead of moving them to the
+-- business account.
+update purchases
+   set refund_to     = paid_by,
+       refund_share1 = case when amount > 0 then round(share1 * (least(refund, amount) / amount), 2) else 0 end,
+       refund_share2 = case when amount > 0 then round(share2 * (least(refund, amount) / amount), 2) else 0 end
+ where refund > 0 and paid_by <> 'business' and refund_to = 'business';
 do $$ begin
   alter table purchases add constraint purchases_paid_by_check
     check (paid_by in ('business','p1','p2','split'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  alter table purchases add constraint purchases_refund_method_check
+    check (refund_method in ('cash','eft'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  alter table purchases add constraint purchases_refund_to_check
+    check (refund_to in ('business','p1','p2','split'));
 exception when duplicate_object then null; end $$;
 
 -- ---------- Stock orders ----------

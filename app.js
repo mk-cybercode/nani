@@ -622,9 +622,15 @@ function totals() {
   // to her instead, and is left alone until she is paid back.
   db.purchases.forEach((p) => {
     if (p.status !== "paid") return;
-    const fromBusiness = Number(p.amount || 0) - shareOf(p, "p1") - shareOf(p, "p2");
-    if (fromBusiness <= 0) return;
-    if (p.method === "eft") bank -= fromBusiness; else cash -= fromBusiness;
+    const fromBusiness = businessShare(p);
+    if (fromBusiness > 0) {
+      if (p.method === "eft") bank -= fromBusiness; else cash -= fromBusiness;
+    }
+    // only the part that landed in the business's own account moves it
+    const back = refundToBusiness(p);
+    if (back > 0) {
+      if ((p.refund_method || "cash") === "eft") bank += back; else cash += back;
+    }
   });
 
   // paying a partner back does leave the business
@@ -647,7 +653,7 @@ function totals() {
     sum + Math.max(0, Number(s.amount || 0) - Number(s.amount_received || 0)), 0);
 
   const weOwe = db.purchases.reduce((sum, p) =>
-    sum + (p.status === "unpaid" ? Number(p.amount || 0) : 0), 0);
+    sum + (p.status === "unpaid" ? Math.max(0, purchaseNet(p)) : 0), 0);
 
   const month = filterRange("this");
   const monthSales = db.sales.filter((s) => inRange(s.date, month));
@@ -656,7 +662,7 @@ function totals() {
     sum + Number(s.unit_cost || 0) * Number(s.units || 0), 0);
   const unitsMonth  = monthSales.reduce((sum, s) => sum + Number(s.units || 0), 0);
   const purchasesMonth = db.purchases.filter((p) => inRange(p.date, month))
-    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    .reduce((sum, p) => sum + purchaseNet(p), 0);
 
   return {
     cash: cash, bank: bank, owedToUs: owedToUs, weOwe: weOwe,
@@ -703,9 +709,12 @@ function homeScreen() {
     '<div class="tiles" style="margin-top:12px">' +
       PARTNER_KEYS.map((key) => {
         const owed = partnerOwed(key).owed;
-        return '<div class="tile' + (owed > 0 ? " tile-warn" : "") + '">' +
-          '<div class="tile-label">Owed to ' + escapeHTML(partnerName(key)) + "</div>" +
-          '<div class="tile-value">' + money(owed) + "</div></div>";
+        const owing = owed < 0;
+        return '<div class="tile' + (owed > 0 ? " tile-warn" : (owing ? " tile-bad" : "")) + '">' +
+          '<div class="tile-label">' +
+            (owing ? escapeHTML(partnerName(key)) + " owes back" : "Owed to " + escapeHTML(partnerName(key))) +
+          "</div>" +
+          '<div class="tile-value">' + money(Math.abs(owed)) + "</div></div>";
       }).join("") +
     "</div>" +
     '<button class="btn btn-block btn-primary" id="h-products" style="margin-top:16px">Products &amp; prices</button>' +
@@ -749,8 +758,9 @@ function recentEntries(limit) {
   db.purchases.forEach((p) => list.push({
     kind: "purchase", id: p.id, when: p.created_at || p.date,
     title: p.item + (p.supplier ? " · " + p.supplier : ""),
-    sub: "Purchase · " + shortDate(p.date) + " · " + (p.method === "eft" ? "EFT" : "Cash"),
-    amountText: "-" + money(p.amount), tone: "amt-bad"
+    sub: "Purchase · " + shortDate(p.date) + " · " + (p.method === "eft" ? "EFT" : "Cash") +
+         (refundOf(p) > 0 ? " · " + money(refundOf(p)) + " refunded" : ""),
+    amountText: "-" + money(purchaseNet(p)), tone: "amt-bad"
   }));
 
   db.stock.forEach((o) => list.push({
@@ -807,6 +817,61 @@ function shareOf(row, key) {
   return Number((key === "p1" ? row.share1 : row.share2) || 0);
 }
 
+/** How much of a purchase came back as a refund, never more than it cost. */
+function refundOf(purchase) {
+  return Math.min(Number(purchase.refund || 0), Number(purchase.amount || 0));
+}
+
+/** What a purchase really cost once the refund is taken off. */
+function purchaseNet(purchase) {
+  return Number(purchase.amount || 0) - refundOf(purchase);
+}
+
+/**
+ * Whose account the refund actually landed in. It need not be whoever
+ * paid for the purchase: money can come back to the business, or
+ * straight into one partner's pocket, or be shared.
+ */
+function refundTo(purchase) {
+  return purchase.refund_to || "business";
+}
+
+/** How much of a refund went to one partner. */
+function refundToPartner(purchase, key) {
+  const total = refundOf(purchase);
+  if (total <= 0) return 0;
+  const where = refundTo(purchase);
+  if (where === key) return total;
+  if (where !== "split") return 0;
+  const share = Number((key === "p1" ? purchase.refund_share1 : purchase.refund_share2) || 0);
+  return Math.min(share, total);
+}
+
+/** How much of a refund came back to the business itself. */
+function refundToBusiness(purchase) {
+  const total = refundOf(purchase);
+  if (total <= 0) return 0;
+  const where = refundTo(purchase);
+  if (where === "business") return total;
+  if (where !== "split") return 0;
+  return Math.max(0, total - refundToPartner(purchase, "p1") - refundToPartner(purchase, "p2"));
+}
+
+/**
+ * What a partner is still out of pocket on this purchase: what she put
+ * in, less any of the refund that came back to her. Money refunded to
+ * her on a purchase she did not pay for still counts — she has had
+ * money from the business either way.
+ */
+function netShareOf(purchase, key) {
+  return shareOf(purchase, key) - refundToPartner(purchase, key);
+}
+
+/** The part of a purchase the business itself paid for. */
+function businessShare(purchase) {
+  return Number(purchase.amount || 0) - shareOf(purchase, "p1") - shareOf(purchase, "p2");
+}
+
 /**
  * Money still owed back to one partner:
  *   what she paid for out of her own pocket, plus anything she put in,
@@ -816,12 +881,15 @@ function shareOf(row, key) {
  * make the business look twice as far in her debt as it is.
  */
 function partnerOwed(key) {
-  const fromPurchases = db.purchases.reduce((sum, p) => sum + shareOf(p, key), 0);
+  const spent = db.purchases.reduce((sum, p) => sum + shareOf(p, key), 0);
+  const refunded = db.purchases.reduce((sum, p) => sum + refundToPartner(p, key), 0);
+  const fromPurchases = spent - refunded;
   const putIn = db.partnerMoney.reduce((sum, m) =>
     sum + (m.partner === key && m.kind === "in" ? Number(m.amount || 0) : 0), 0);
   const paidBack = db.partnerMoney.reduce((sum, m) =>
     sum + (m.partner === key && m.kind === "repaid" ? Number(m.amount || 0) : 0), 0);
-  return { fromPurchases: fromPurchases, putIn: putIn, paidBack: paidBack,
+  return { fromPurchases: fromPurchases, spent: spent, refunded: refunded,
+           putIn: putIn, paidBack: paidBack,
            owed: fromPurchases + putIn - paidBack };
 }
 
@@ -845,6 +913,14 @@ function fundingShares(paidBy, total, firstShare) {
     return { share1: first, share2: total - first };
   }
   return { share1: 0, share2: 0 };           // the business paid
+}
+
+/** Plain words for whose account a refund went into. */
+function refundWhereLabel(purchase) {
+  const where = refundTo(purchase);
+  if (where === "p1" || where === "p2") return partnerName(where);
+  if (where === "split") return partnerName("p1") + " and " + partnerName("p2");
+  return (purchase.refund_method === "eft") ? "the bank" : "cash";
 }
 
 function fundingLabel(row) {
@@ -892,13 +968,17 @@ function moneyScreen() {
   let html = "";
   PARTNER_KEYS.forEach((key) => {
     const t = partnerOwed(key);
+    const owing = t.owed < 0;
     html +=
-      '<div class="tile tile-wide' + (t.owed > 0 ? " tile-warn" : "") + '" style="margin-bottom:12px">' +
-        '<div class="tile-label">Owed to ' + escapeHTML(partnerName(key)) + "</div>" +
-        '<div class="tile-value">' + money(t.owed) + "</div>" +
+      '<div class="tile tile-wide' + (t.owed > 0 ? " tile-warn" : (owing ? " tile-bad" : "")) + '" style="margin-bottom:12px">' +
+        '<div class="tile-label">' +
+          (owing ? escapeHTML(partnerName(key)) + " owes the business"
+                 : "Owed to " + escapeHTML(partnerName(key))) + "</div>" +
+        '<div class="tile-value">' + money(Math.abs(t.owed)) + "</div>" +
         '<div class="tile-foot">' +
-          money(t.fromPurchases) + " on purchases · " + money(t.putIn) + " put in · " +
-          money(t.paidBack) + " paid back</div>" +
+          money(t.spent) + " on purchases · " + money(t.putIn) + " put in · " +
+          money(t.paidBack) + " paid back" +
+          (t.refunded > 0 ? " · " + money(t.refunded) + " refunds she kept" : "") + "</div>" +
         '<div class="tile-foot">' + money(shelfValue(key)) + " of her money sitting in stock on shelves</div>" +
       "</div>";
   });
@@ -930,6 +1010,21 @@ function moneyScreen() {
 /** Purchases a partner paid for, plus her own money in and payments back. */
 function partnerEntries() {
   const list = [];
+
+  // a refund paid into a partner's own account, whoever bought the goods
+  db.purchases.forEach((p) => {
+    PARTNER_KEYS.forEach((key) => {
+      const back = refundToPartner(p, key);
+      if (back <= 0) return;
+      list.push({
+        kind: "purchase", id: p.id, when: p.created_at || p.date,
+        title: partnerName(key) + " got the refund on " + p.item,
+        sub: "Refund · " + shortDate(p.refund_date || p.date) +
+             (p.supplier ? " · " + p.supplier : ""),
+        amountText: "−" + money(back), tone: ""
+      });
+    });
+  });
 
   db.purchases.forEach((p) => {
     if (p.paid_by === "business" || !p.paid_by) return;
@@ -1207,13 +1302,14 @@ function purchasesScreen() {
 
   const range = filterRange(state.filter.purchases);
   const rows = db.purchases.filter((p) => inRange(p.date, range));
-  const total = rows.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const total    = rows.reduce((sum, p) => sum + purchaseNet(p), 0);
+  const refunded = rows.reduce((sum, p) => sum + refundOf(p), 0);
   const owing = rows.filter((p) => p.status === "unpaid")
-                    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+                    .reduce((sum, p) => sum + Math.max(0, purchaseNet(p)), 0);
 
   let html = filterBar("purchases");
   html += '<div class="section-head"><span>' + rows.length + " purchase" + (rows.length === 1 ? "" : "s") +
-          "</span><span>" + money(total) + "</span></div>";
+          "</span><span>" + money(total) + (refunded > 0 ? " after refunds" : "") + "</span></div>";
 
   if (!rows.length) {
     html += emptyBox("No purchases yet. Tap + to add the first one.");
@@ -1230,20 +1326,25 @@ function purchasesScreen() {
           '<div class="row-sub">' +
             (p.supplier ? escapeHTML(p.supplier) + " · " : "") + shortDate(p.date) +
             " · " + (p.method === "eft" ? "EFT" : "Cash") +
-            (p.paid_by && p.paid_by !== "business" ? " · " + escapeHTML(fundingLabel(p)) : "") + "</div>" +
+            (p.paid_by && p.paid_by !== "business" ? " · " + escapeHTML(fundingLabel(p)) : "") +
+            (refundOf(p) > 0 ? " · " + money(refundOf(p)) + " back to " + refundWhereLabel(p) : "") + "</div>" +
         "</div>" +
         '<div class="row-side">' +
-          '<div class="row-amt">' + money(p.amount) + "</div>" +
-          '<span class="pill ' + (paid ? "pill-good" : "pill-bad") + '">' +
-            (paid ? "Paid" : "Not paid") + "</span>" +
+          '<div class="row-amt">' + money(purchaseNet(p)) + "</div>" +
+          '<span class="pill ' + (refundOf(p) > 0 ? "pill-warn" : (paid ? "pill-good" : "pill-bad")) + '">' +
+            (refundOf(p) >= Number(p.amount || 0) && refundOf(p) > 0
+              ? "Refunded"
+              : (refundOf(p) > 0 ? "Part refunded" : (paid ? "Paid" : "Not paid"))) + "</span>" +
         "</div>" +
       "</button>";
   });
   html += "</div>";
 
-  if (owing > 0) {
-    html += '<p class="field-hint" style="text-align:center">Still to pay in this period: <strong>' +
-            money(owing) + "</strong></p>";
+  const footer = [];
+  if (owing > 0) footer.push("Still to pay: <strong>" + money(owing) + "</strong>");
+  if (refunded > 0) footer.push("Refunded back to you: <strong>" + money(refunded) + "</strong>");
+  if (footer.length) {
+    html += '<p class="field-hint" style="text-align:center">' + footer.join(" · ") + "</p>";
   }
   return html;
 }
@@ -1252,7 +1353,8 @@ function editPurchase(purchase) {
   const isNew = !purchase;
   const p = purchase || {
     date: todayISO(), item: "", supplier: "", amount: "",
-    status: "paid", method: "cash", paid_by: "business", share1: "", share2: "", note: ""
+    status: "paid", method: "cash", paid_by: "business", share1: "", share2: "",
+    refund: "", refund_date: "", refund_method: "cash", note: ""
   };
 
   const suppliers = uniqueValues(db.purchases, "supplier");
@@ -1266,6 +1368,26 @@ function editPurchase(purchase) {
     field("Payment", choice("f-status", [["paid", "Paid"], ["unpaid", "Not paid"]], p.status)) +
     field("Method", choice("f-method", [["cash", "Cash"], ["eft", "EFT"]], p.method)) +
     fundingField(p) +
+    field("Did you get any money back?", choice("f-refunded", [
+      ["no", "No"], ["yes", "Yes, refunded"]
+    ], Number(p.refund || 0) > 0 ? "yes" : "no")) +
+    '<div id="wrap-refund">' +
+      field("How much came back", amountInput("f-refund", p.refund)) +
+      field("Date refunded", '<input id="f-refund-date" type="date" value="' +
+            escapeHTML(p.refund_date || todayISO()) + '">') +
+      field("Whose account did it go into?", choice("f-refund-to", [
+        ["business", "Business"], ["p1", partnerName("p1")],
+        ["p2", partnerName("p2")], ["split", "Split"]
+      ], p.refund_to || "business")) +
+      '<div id="wrap-refund-method">' +
+        field("Back as", choice("f-refund-method",
+              [["cash", "Cash"], ["eft", "EFT"]], p.refund_method || "cash")) +
+      "</div>" +
+      '<div id="wrap-refund-split">' +
+        field(partnerName("p1") + " got back", amountInput("f-refund-share1", p.refund_share1)) +
+      "</div>" +
+      '<div class="totals-box" id="f-refund-totals"></div>' +
+    "</div>" +
     field("Note (optional)", '<textarea id="f-note">' + escapeHTML(p.note || "") + "</textarea>") +
     (isNew ? "" : deleteButton());
 
@@ -1277,6 +1399,22 @@ function editPurchase(purchase) {
 
     const paidBy = choiceValue("f-paidby");
     const shares = fundingShares(paidBy, amount, toNum($("#f-share1").value));
+    const refund = choiceValue("f-refunded") === "yes" ? toNum($("#f-refund").value) : 0;
+
+    if (choiceValue("f-refunded") === "yes" && refund <= 0) {
+      toast("Enter how much came back."); return false;
+    }
+    if (refund > amount) {
+      toast("The refund is more than the purchase cost."); return false;
+    }
+
+    const refundWhere = refund > 0 ? choiceValue("f-refund-to") : "business";
+    const refundShares = refundWhere === "split"
+      ? fundingShares("split", refund, toNum($("#f-refund-share1").value))
+      : { share1: refundWhere === "p1" ? refund : 0, share2: refundWhere === "p2" ? refund : 0 };
+    if (refundWhere === "split" && (refundShares.share1 <= 0 || refundShares.share2 <= 0)) {
+      toast("Both shares of the refund must be more than nothing."); return false;
+    }
     const row = {
       date: $("#f-date").value || todayISO(),
       item: item,
@@ -1287,15 +1425,75 @@ function editPurchase(purchase) {
       paid_by: paidBy,
       share1: shares.share1,
       share2: shares.share2,
+      refund: refund,
+      refund_date: refund > 0 ? ($("#f-refund-date").value || todayISO()) : null,
+      refund_method: choiceValue("f-refund-method"),
+      refund_to: refundWhere,
+      refund_share1: refundShares.share1,
+      refund_share2: refundShares.share2,
       note: $("#f-note").value.trim() || null
     };
     const ok = await save("purchases", row, isNew ? null : p.id);
-    if (ok) toast(isNew ? "Purchase saved." : "Purchase updated.");
+    if (ok) toast(refund > 0
+      ? "Saved — " + money(refund) + " refunded."
+      : (isNew ? "Purchase saved." : "Purchase updated."));
     return ok;
   });
 
   const refreshSplit = wireFunding(() => toNum($("#f-amount").value));
-  $("#f-amount").addEventListener("input", refreshSplit);
+
+  const showRefund = () => {
+    const on = choiceValue("f-refunded") === "yes";
+    $("#wrap-refund").hidden = !on;
+    if (!on) return;
+
+    const amount = toNum($("#f-amount").value);
+    const refund = Math.min(toNum($("#f-refund").value), amount);
+    const method = choiceValue("f-refund-method");
+    const where = choiceValue("f-refund-to");
+    const shares = where === "split"
+      ? fundingShares("split", refund, toNum($("#f-refund-share1").value))
+      : { share1: where === "p1" ? refund : 0, share2: where === "p2" ? refund : 0 };
+
+    $("#wrap-refund-method").hidden = (where !== "business");
+    $("#wrap-refund-split").hidden = (where !== "split");
+
+    const pretend = { refund: refund, amount: amount, refund_to: where,
+                      refund_share1: shares.share1, refund_share2: shares.share2 };
+
+    const lines = [
+      '<div class="totals-row"><span>The purchase really cost</span><strong>' +
+        money(Math.max(0, amount - refund)) + "</strong></div>"
+    ];
+    const toBusiness = refundToBusiness(pretend);
+    if (toBusiness > 0) {
+      lines.push('<div class="totals-row"><span>Into ' +
+        (method === "eft" ? "the bank" : "cash on hand") + "</span><strong>" +
+        money(toBusiness) + "</strong></div>");
+    }
+    PARTNER_KEYS.forEach((key) => {
+      const back = refundToPartner(pretend, key);
+      if (back <= 0) return;
+      const owedNow = partnerOwed(key).owed - (isNew ? 0 : -refundToPartner(p, key));
+      const after = owedNow - back;
+      lines.push('<div class="totals-row"><span>Into ' + escapeHTML(partnerName(key)) +
+        "'s pocket</span><strong>" + money(back) + "</strong></div>");
+      lines.push('<div class="totals-row"><span>' +
+        (after < 0 ? "So she will owe the business" : "So the business will owe her") +
+        "</span><span>" + money(Math.abs(after)) + "</span></div>");
+    });
+    $("#f-refund-totals").innerHTML = lines.join("");
+  };
+
+  onChoice("f-refunded", showRefund);
+  onChoice("f-refund-method", showRefund);
+  onChoice("f-refund-to", showRefund);
+  onChoice("f-paidby", showRefund);
+  $("#f-refund").addEventListener("input", showRefund);
+  $("#f-refund-share1").addEventListener("input", showRefund);
+  $("#f-share1").addEventListener("input", showRefund);
+  $("#f-amount").addEventListener("input", () => { refreshSplit(); showRefund(); });
+  showRefund();
 
   if (!isNew) wireDelete("this purchase", () => remove("purchases", p.id));
 }
@@ -2039,13 +2237,17 @@ function exportSpreadsheets(period) {
 
   if (data.purchases.length) {
     later(() => csvFile("nanies-purchases-" + tag + "-" + stamp + ".csv",
-      ["Date", "Item", "Supplier", "Amount", "Status", "Method", "Who paid",
+      ["Date", "Item", "Supplier", "Amount", "Refund", "Refund date", "Refund into",
+       "Net cost", "Status", "Method", "Who paid",
        partnerName("p1") + " share", partnerName("p2") + " share", "Note"],
       data.purchases.map((p) => [
         p.date, p.item, p.supplier || "", Number(p.amount || 0).toFixed(2),
+        refundOf(p).toFixed(2), p.refund_date || "",
+        refundOf(p) > 0 ? refundWhereLabel(p) : "",
+        purchaseNet(p).toFixed(2),
         p.status === "paid" ? "Paid" : "Not paid",
         p.method === "eft" ? "EFT" : "Cash", fundingLabel(p),
-        Number(p.share1 || 0).toFixed(2), Number(p.share2 || 0).toFixed(2), p.note || ""
+        netShareOf(p, "p1").toFixed(2), netShareOf(p, "p2").toFixed(2), p.note || ""
       ])), files++ * 350);
   }
 
@@ -2130,7 +2332,8 @@ function exportStatement(period) {
   const salesTotal = data.sales.reduce((sum, r) => sum + Number(r.amount || 0), 0);
   const profitTotal = data.sales.reduce((sum, r) => sum + saleProfit(r), 0);
   const unitsTotal = data.sales.reduce((sum, r) => sum + Number(r.units || 0), 0);
-  const purchasesTotal = data.purchases.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+  const purchasesTotal = data.purchases.reduce((sum, r) => sum + purchaseNet(r), 0);
+  const refundTotal = data.purchases.reduce((sum, r) => sum + refundOf(r), 0);
 
   let html =
     "<h1>" + escapeHTML(CONFIG.BUSINESS_NAME) + "</h1>" +
@@ -2152,6 +2355,9 @@ function exportStatement(period) {
       "<tr><td><strong>Profit on sales</strong></td><td class=\"num\"><strong>" +
         money(profitTotal) + "</strong></td></tr>" +
       "<tr><td>Purchases in this period</td><td class=\"num\">" + money(purchasesTotal) + "</td></tr>" +
+      (refundTotal > 0
+        ? "<tr><td>Refunded by suppliers</td><td class=\"num\">" + money(refundTotal) + "</td></tr>"
+        : "") +
       "<tr><td><strong>Sales less purchases</strong></td><td class=\"num\"><strong>" +
         money(salesTotal - purchasesTotal) + "</strong></td></tr>" +
     "</tbody></table>";
@@ -2162,9 +2368,11 @@ function exportStatement(period) {
       money(s.unit_price), money(s.amount), money(saleProfit(s)),
       money(s.amount_received), (SALE_STATUS[s.status] || {}).label || s.status]));
 
-  html += table("Purchases", ["Date", "Item", "Supplier", "Amount", "Status"],
+  html += table("Purchases",
+    ["Date", "Item", "Supplier", "Amount", "Refund", "Refund into", "Net cost", "Status"],
     data.purchases.map((p) => [niceDate(p.date), p.item, p.supplier || "", money(p.amount),
-      p.status === "paid" ? "Paid" : "Not paid"]));
+      refundOf(p) > 0 ? money(refundOf(p)) : "", refundOf(p) > 0 ? refundWhereLabel(p) : "",
+      money(purchaseNet(p)), p.status === "paid" ? "Paid" : "Not paid"]));
 
   html += table("Stock orders", ["Ordered", "Product", "Customer", "Units", "Delivered", "Outstanding"],
     data.stock.map((o) => [niceDate(o.date_ordered), o.product, o.customer,
